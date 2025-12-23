@@ -13,11 +13,11 @@ from bs4 import BeautifulSoup
 st.set_page_config(page_title="帥哥城 AI 投顧", page_icon="📈", layout="wide")
 
 # ==========================================
-# 🕵️‍♂️ 數據獲取層 (混合策略)
+# 🕵️‍♂️ 數據獲取層 (新增中文爬蟲)
 # ==========================================
 
 def get_yahoo_web_scraper(stock_id):
-    """[備援] 當 yfinance 抓不到資料時，啟動暴力爬蟲"""
+    """[備援] 抓取財務數據 (本益比/殖利率)"""
     headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
@@ -46,6 +46,47 @@ def get_yahoo_web_scraper(stock_id):
         return data
     except:
         return {'Name': stock_id, 'PE': None, 'PB': None, 'Yield': None}
+
+def get_chinese_profile(stock_id):
+    """
+    [新增] 抓取中文公司簡介
+    策略：爬取 Yahoo 股市的 '基本資料' 頁面，抓取 '主要業務'
+    """
+    try:
+        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/profile"
+        headers = { "User-Agent": "Mozilla/5.0" }
+        r = requests.get(url, headers=headers)
+        r.encoding = 'utf-8'
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # Yahoo 的結構比較亂，我們直接搜尋包含 "主要業務" 的區塊
+        # 通常它會是一個 label，內容在它的 sibling (兄弟節點)
+        
+        # 方法 1: 嘗試找包含 "主要業務" 的 div，然後找它的內容
+        # Yahoo 改版後，這通常在一個 panel 裡
+        elements = soup.find_all('div')
+        for i, el in enumerate(elements):
+            if "主要業務" in el.text and len(el.text) < 10: # 找到標題
+                # 內容通常在後面幾個 div 內
+                # 這裡做一個簡單的往下搜尋
+                for j in range(1, 5):
+                    if i + j < len(elements):
+                        content = elements[i+j].text.strip()
+                        if len(content) > 10: # 找到足夠長的描述
+                            return content
+        
+        # 方法 2: 如果上面失敗，嘗試抓 meta description
+        meta = soup.find('meta', attrs={'name': 'description'})
+        if meta:
+            desc = meta.get('content', '')
+            # 清理一下，只留公司介紹部分
+            if "主要業務" in desc:
+                return desc.split("主要業務")[-1].split("。")[0]
+            return desc
+            
+        return "暫無中文業務描述 (爬取失敗)"
+    except Exception as e:
+        return f"暫無資料"
 
 def get_financial_data(stock_id, info):
     """[核心邏輯] 優先使用 yfinance"""
@@ -142,6 +183,9 @@ def generate_full_analysis(stock_id):
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
     
+    # ✅ 呼叫新的中文爬蟲
+    zh_summary = get_chinese_profile(stock_id)
+    
     score = 50
     reasons = []
     
@@ -182,7 +226,8 @@ def generate_full_analysis(stock_id):
         "chip_status": chip_status,
         "insider": insider,
         "today": today,
-        "info": info
+        "info": info,
+        "zh_summary": zh_summary # 傳遞中文簡介
     }
 
 # ==========================================
@@ -237,12 +282,13 @@ if run_btn and user_input:
         
         with tab1:
             st.subheader("業務背景 (Business Context)")
-            summary = data['info'].get('longBusinessSummary', '暫無詳細業務描述 (yfinance 未提供)。')
+            # 顯示中文簡介
+            st.write(data['zh_summary'])
+            
+            st.markdown("---")
             industry = data['info'].get('industry', 'N/A')
             sector = data['info'].get('sector', 'N/A')
-            st.markdown(f"**產業板塊**：{sector} > {industry}")
-            st.markdown("**業務簡介**：")
-            st.write(summary)
+            st.caption(f"**產業板塊**：{sector} > {industry}")
             
         with tab2:
             st.subheader("財務績效 (Financial Performance)")
@@ -316,7 +362,6 @@ if run_btn and user_input:
                 if data['price'] > data['today']['MA20']: st.write("- **動能強勁**：站穩月線，多頭動能延續。")
 
             st.markdown("---")
-            # ✅ [已修復] 這裡改用 f-string，不會再報錯了
             st.markdown(f"""
             **私人投資者最終評估**：
             基於上述 **技術面、基本面、籌碼面** 的綜合分析，本系統建議採取 **【{data['verdict']}】** 策略。
@@ -324,4 +369,4 @@ if run_btn and user_input:
             """)
 
     else:
-        st.error
+        st.error(f"❌ 查無代碼 {stock_code}，請確認是否輸入正確。")
