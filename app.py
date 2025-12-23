@@ -13,35 +13,47 @@ from bs4 import BeautifulSoup
 st.set_page_config(page_title="帥哥城 AI 投顧", page_icon="📈", layout="wide")
 
 # ==========================================
-# 🕵️‍♂️ 數據獲取層 (新增中文爬蟲)
+# 🕵️‍♂️ 數據獲取層 (強力修正版)
 # ==========================================
 
 def get_yahoo_web_scraper(stock_id):
-    """[備援] 抓取財務數據 (本益比/殖利率)"""
+    """
+    [修正版] 抓取財務數據 (本益比/殖利率)
+    策略：遍歷所有 li 列表項目，使用 Regex 提取數字
+    """
     headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
         r = requests.get(url, headers=headers)
         r.encoding = 'utf-8'
         soup = BeautifulSoup(r.text, 'html.parser')
-        text = soup.get_text()
         
         data = {}
+        # 抓中文名
         try:
             title = soup.title.text
             match = re.search(r'^(.+?)\(', title)
             data['Name'] = match.group(1).strip() if match else stock_id
         except: data['Name'] = stock_id
 
-        def search_val(keyword):
-            pattern = re.compile(f"{keyword}\s*[:：]?\s*(-?\d+\.?\d*)")
-            match = pattern.search(text)
-            return float(match.group(1)) if match else None
+        # 抓數據 (針對 li 標籤進行精準打擊)
+        def find_val(keyword):
+            try:
+                # Yahoo 數據通常放在 li 裡面
+                for item in soup.find_all('li'):
+                    if keyword in item.text:
+                        # 使用 Regex 抓取數字 (包含小數點)
+                        # 排除文字，只抓 12.34 或 -12.34
+                        match = re.search(r'(-?\d+\.\d+|-?\d+)', item.text)
+                        if match:
+                            return float(match.group(0))
+            except: pass
+            return None
 
-        data['PE'] = search_val("本益比")
-        data['PB'] = search_val("股價淨值比")
-        data['Yield'] = search_val("殖利率")
-        if data['Yield'] is None: data['Yield'] = search_val("現金殖利率")
+        data['PE'] = find_val("本益比")
+        data['PB'] = find_val("股價淨值比")
+        data['Yield'] = find_val("殖利率")
+        if data['Yield'] is None: data['Yield'] = find_val("現金殖利率")
         
         return data
     except:
@@ -49,8 +61,8 @@ def get_yahoo_web_scraper(stock_id):
 
 def get_chinese_profile(stock_id):
     """
-    [新增] 抓取中文公司簡介
-    策略：爬取 Yahoo 股市的 '基本資料' 頁面，抓取 '主要業務'
+    [強力修正] 抓取中文公司簡介
+    策略：直接鎖定 '主要業務' 關鍵字，抓取其後的內容
     """
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}/profile"
@@ -59,34 +71,37 @@ def get_chinese_profile(stock_id):
         r.encoding = 'utf-8'
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Yahoo 的結構比較亂，我們直接搜尋包含 "主要業務" 的區塊
-        # 通常它會是一個 label，內容在它的 sibling (兄弟節點)
+        # 策略 1: 尋找包含 "主要業務" 的區塊
+        # Yahoo 的結構通常是：<div ...>主要業務</div><div ...>內容在這裡</div>
+        # 我們找所有文字包含 "主要業務" 的元素
+        targets = soup.find_all(string=re.compile("主要業務"))
         
-        # 方法 1: 嘗試找包含 "主要業務" 的 div，然後找它的內容
-        # Yahoo 改版後，這通常在一個 panel 裡
-        elements = soup.find_all('div')
-        for i, el in enumerate(elements):
-            if "主要業務" in el.text and len(el.text) < 10: # 找到標題
-                # 內容通常在後面幾個 div 內
-                # 這裡做一個簡單的往下搜尋
-                for j in range(1, 5):
-                    if i + j < len(elements):
-                        content = elements[i+j].text.strip()
-                        if len(content) > 10: # 找到足夠長的描述
-                            return content
-        
-        # 方法 2: 如果上面失敗，嘗試抓 meta description
+        for target in targets:
+            # 往上找父層，再找包含內容的區塊
+            parent = target.parent
+            # 嘗試找這個區塊附近的文字
+            # 通常內容會在 parent 的下一個兄弟節點，或是 parent 的父層的文字
+            container = parent.find_next('div')
+            if container and len(container.text) > 10:
+                return container.text.strip()
+            
+            # 備用：如果是舊版結構，可能直接在後面的 span 或 div
+            next_sib = parent.find_next_sibling()
+            if next_sib and len(next_sib.text) > 10:
+                return next_sib.text.strip()
+
+        # 策略 2: 如果上面失敗，抓 Meta Description 但要清洗
         meta = soup.find('meta', attrs={'name': 'description'})
         if meta:
             desc = meta.get('content', '')
-            # 清理一下，只留公司介紹部分
-            if "主要業務" in desc:
-                return desc.split("主要業務")[-1].split("。")[0]
+            # 清洗掉 Yahoo 的廣告詞
+            if "提供公司基本資料" in desc:
+                return "暫無詳細中文業務描述 (Yahoo 資料格式限制)"
             return desc
             
-        return "暫無中文業務描述 (爬取失敗)"
+        return "暫無中文業務描述"
     except Exception as e:
-        return f"暫無資料"
+        return "暫無資料"
 
 def get_financial_data(stock_id, info):
     """[核心邏輯] 優先使用 yfinance"""
@@ -96,6 +111,7 @@ def get_financial_data(stock_id, info):
     
     if div_yield: div_yield = div_yield * 100
 
+    # 只要有缺漏，就啟動爬蟲補齊
     if pe is None or pb is None or div_yield is None:
         web_data = get_yahoo_web_scraper(stock_id)
         if pe is None: pe = web_data.get('PE')
@@ -112,7 +128,7 @@ def get_financial_data(stock_id, info):
     return {"Name": stock_name, "PE": pe, "PB": pb, "Yield": div_yield}
 
 def get_mops_insider(stock_id):
-    """MOPS 董監持股 (回溯 3 個月)"""
+    """MOPS 董監持股"""
     clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
     url = "https://mopsov.twse.com.tw/mops/web/ajax_t146sb05"
     now = datetime.datetime.now()
@@ -183,12 +199,13 @@ def generate_full_analysis(stock_id):
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
     
-    # ✅ 呼叫新的中文爬蟲
+    # 呼叫修正後的中文爬蟲
     zh_summary = get_chinese_profile(stock_id)
     
     score = 50
     reasons = []
     
+    # 評分邏輯
     price = today['Close']
     if price > today['MA20']: score += 10; reasons.append("股價站上月線，短多確立")
     else: score -= 10; reasons.append("股價跌破月線，短線整理")
@@ -227,7 +244,7 @@ def generate_full_analysis(stock_id):
         "insider": insider,
         "today": today,
         "info": info,
-        "zh_summary": zh_summary # 傳遞中文簡介
+        "zh_summary": zh_summary
     }
 
 # ==========================================
@@ -249,7 +266,7 @@ if run_btn and user_input:
     stock_code = user_input.strip().upper()
     if stock_code.isdigit(): stock_code += ".TW"
     
-    with st.spinner(f"正在整合 yfinance 與 MOPS 數據分析 {stock_code}..."):
+    with st.spinner(f"正在分析 {stock_code} ..."):
         data = generate_full_analysis(stock_code)
         
     if data:
@@ -260,16 +277,13 @@ if run_btn and user_input:
         m2.metric("投資建議", data['verdict'].split(' ')[0])
         m3.metric("最新收盤價", f"{data['price']:.2f}")
         
-        source_note = "數據來源：yfinance (優先)"
-        if data['fin']['PE'] is None and data['fin']['PB'] is None:
-             source_note += " + Web Crawler (備援)"
+        source_note = "數據來源：yfinance + 網頁爬蟲"
         m4.caption(source_note)
         
         st.info(f"""
         **關鍵見解**：
-        本系統針對 {data['name']} 進行多維度分析，目前評分為 **{data['score']} 分**。
-        主要驅動因素為：**{data['reasons'][0] if data['reasons'] else '數據中性'}**。
-        市場目前處於 **{data['chip_status']}** 階段，建議投資人 **{data['verdict'].split('(')[0]}**。
+        目前評分為 **{data['score']} 分**，市場處於 **{data['chip_status']}** 階段。
+        系統建議：**{data['verdict'].split('(')[0]}**。
         """)
 
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -282,8 +296,11 @@ if run_btn and user_input:
         
         with tab1:
             st.subheader("業務背景 (Business Context)")
-            # 顯示中文簡介
-            st.write(data['zh_summary'])
+            # 這裡會顯示真正抓到的中文簡介，而不是 Yahoo 廣告詞
+            if "Yahoo" in data['zh_summary']:
+                st.warning("⚠️ 來源網站限制，無法取得完整中文描述。")
+            else:
+                st.write(data['zh_summary'])
             
             st.markdown("---")
             industry = data['info'].get('industry', 'N/A')
@@ -293,79 +310,54 @@ if run_btn and user_input:
         with tab2:
             st.subheader("財務績效 (Financial Performance)")
             f1, f2, f3 = st.columns(3)
-            pe_val = f"{data['fin']['PE']:.2f}" if data['fin']['PE'] else "N/A"
-            pb_val = f"{data['fin']['PB']:.2f}" if data['fin']['PB'] else "N/A"
-            yld_val = f"{data['fin']['Yield']:.2f}%" if data['fin']['Yield'] else "N/A"
+            # 數據處理：如果是 None 顯示 N/A，否則顯示數字
+            pe_val = f"{data['fin']['PE']:.2f}" if data['fin']['PE'] is not None else "N/A"
+            pb_val = f"{data['fin']['PB']:.2f}" if data['fin']['PB'] is not None else "N/A"
+            yld_val = f"{data['fin']['Yield']:.2f}%" if data['fin']['Yield'] is not None else "N/A"
+            
             f1.metric("本益比 (P/E)", pe_val)
             f2.metric("股價淨值比 (P/B)", pb_val)
-            f3.metric("殖利率 (Dividend Yield)", yld_val)
+            f3.metric("殖利率 (Yield)", yld_val)
             
             st.markdown("---")
             ef1, ef2, ef3 = st.columns(3)
             roe = data['info'].get('returnOnEquity', None)
             rev_growth = data['info'].get('revenueGrowth', None)
             gross_margin = data['info'].get('grossMargins', None)
+            
             ef1.metric("ROE", f"{roe*100:.2f}%" if roe else "N/A")
             ef2.metric("營收成長率 (YoY)", f"{rev_growth*100:.2f}%" if rev_growth else "N/A")
             ef3.metric("毛利率", f"{gross_margin*100:.2f}%" if gross_margin else "N/A")
 
         with tab3:
-            st.subheader("所有權與交易動態 (Ownership)")
+            st.subheader("所有權與交易動態")
             c1, c2 = st.columns(2)
             with c1:
                 st.write(f"**法人籌碼動向**：{data['chip_status']}")
                 if data['chips']:
                     st.json(data['chips'])
-                    if data['chips']['foreign'] > 0 and data['chips']['trust'] > 0:
-                        st.success("🔥 土洋合一：外資與投信同步買超")
                 else:
                     st.warning("⚠️ 無法取得今日法人籌碼")
             with c2:
-                st.write("**內部人持股 (Insider)**")
+                st.write("**內部人持股**")
                 if data['insider']:
                     st.metric("董監持股比例", f"{data['insider']}%")
-                    st.progress(min(int(data['insider']), 100))
-                    st.caption("數據來源：公開資訊觀測站 (MOPS)")
                 else:
-                    st.write("暫無最新董監持股資料")
+                    st.write("暫無資料")
 
         with tab4:
-            st.subheader("技術分析 (Technical Analysis)")
+            st.subheader("技術分析")
             t1, t2, t3 = st.columns(3)
             t1.metric("RSI (14)", f"{data['today']['RSI']:.2f}")
-            t2.metric("MACD 柱狀", f"{data['today']['MACD'] - data['today']['Signal']:.2f}")
+            t2.metric("MACD", f"{data['today']['MACD'] - data['today']['Signal']:.2f}")
             t3.metric("收盤價 vs 月線", f"{'站上 🔼' if data['price'] > data['today']['MA20'] else '跌破 🔻'}")
-            
-            st.markdown("#### 趨勢訊號")
-            if data['price'] > data['today']['MA60']:
-                st.success("✅ 長期趨勢：多頭 (股價 > 季線)")
-            else:
-                st.error("🔻 長期趨勢：空頭 (股價 < 季線)")
-            if data['today']['MACD'] > data['today']['Signal']:
-                st.info("⚡ 動能：黃金交叉 (轉強)")
-            else:
-                st.caption("💤 動能：死亡交叉 (轉弱)")
 
         with tab5:
-            st.subheader("未來展望與風險 (Outlook & Risks)")
-            r1, r2 = st.columns(2)
-            with r1:
-                st.markdown("### 🔴 潛在風險")
-                if data['today']['RSI'] > 75: st.write("- **技術面過熱**：RSI 指標過高，短線有回檔風險。")
-                if data['fin']['PE'] and float(data['fin']['PE']) > 40: st.write("- **估值過高**：本益比 > 40，股價可能已反應未來利多。")
-                if data['chips'] and data['chips']['foreign'] < 0: st.write("- **籌碼鬆動**：外資近期站在賣方。")
-                if not data['reasons']: st.write("- 目前數據面無顯著立即風險。")
-            with r2:
-                st.markdown("### 🟢 策略催化劑")
-                if data['today']['RSI'] < 25: st.write("- **超賣反彈**：RSI 進入低檔區，具備反彈契機。")
-                if data['chips'] and data['chips']['trust'] > 0: st.write("- **投信作帳**：投信持續買進，可能有季底作帳行情。")
-                if data['price'] > data['today']['MA20']: st.write("- **動能強勁**：站穩月線，多頭動能延續。")
-
-            st.markdown("---")
+            st.subheader("未來展望與風險")
             st.markdown(f"""
             **私人投資者最終評估**：
-            基於上述 **技術面、基本面、籌碼面** 的綜合分析，本系統建議採取 **【{data['verdict']}】** 策略。
-            請密切關注 **月線支撐 ({data['today']['MA20']:.2f})**，若跌破建議適度減碼，若站穩則可續抱。
+            本系統建議採取 **【{data['verdict']}】** 策略。
+            請密切關注 **月線支撐 ({data['today']['MA20']:.2f})**，若跌破建議適度減碼。
             """)
 
     else:
