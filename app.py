@@ -17,61 +17,57 @@ st.set_page_config(page_title="帥哥城 AI 投顧", page_icon="📈", layout="w
 # 🛠️ 工具函式
 # ==========================================
 def translate_to_chinese(text):
-    """將英文簡介翻譯成繁體中文"""
     try:
         if not text or len(text) < 5: return "暫無詳細業務描述。"
         return GoogleTranslator(source='auto', target='zh-TW').translate(text)
     except: return text
 
 # ==========================================
-# 🕵️‍♂️ 數據獲取層 (Goodinfo 財務 + 籌碼 + Yahoo)
+# 🕵️‍♂️ 數據獲取層 (Goodinfo 優先 -> Yahoo 備援)
 # ==========================================
 
-def get_goodinfo_financials(stock_id):
+def get_financials_hybrid(stock_id, info):
     """
-    [新增] 爬取 Goodinfo 財務狀況與獲利能力
-    抓取：毛利率、營益率、淨利率、ROE、ROA、EPS、每股淨值
+    [混合獲取] 財務三率與經營績效
+    策略：
+    1. 先嘗試爬 Goodinfo (資料最詳細)
+    2. 如果被封鎖，自動切換用 yfinance 補齊數據
     """
     clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
-    url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={clean_id}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Referer": "https://goodinfo.tw/"
-    }
+    data = {}
+    source = "Goodinfo"
     
+    # --- 嘗試 1: Goodinfo 爬蟲 ---
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={clean_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://goodinfo.tw/tw/StockDetail.asp",
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+        }
+        r = requests.get(url, headers=headers, timeout=5)
         r.encoding = "utf-8"
+        
+        # 檢查是否被封鎖 (內容太短通常是被檔)
+        if len(r.text) < 500: raise Exception("Blocked")
+            
         dfs = pd.read_html(io.StringIO(r.text))
         
-        data = {}
-        
-        # 遍歷所有表格尋找目標數據
+        # 尋找包含數據的表格
         for df in dfs:
             df_str = df.to_string()
-            
-            # 1. 找獲利能力 (毛利率、營益率...)
             if "毛利率" in df_str and "ROE" in df_str:
-                # 這種表格通常第一欄是項目，第二欄是數值
-                # 轉成字典方便搜尋
-                # 有時候 Goodinfo 會把表格轉置，所以我們用暴力搜索文字
                 text_map = {}
+                # 暴力轉成字典
                 for idx, row in df.iterrows():
                     for col in range(len(df.columns)-1):
-                        key = str(row[col])
-                        val = str(row[col+1])
-                        text_map[key] = val
+                        text_map[str(row[col])] = str(row[col+1])
                 
-                # 提取數據 (移除 % 和其他符號)
-                def clean_val(v):
-                    if not v or v == 'nan': return None
-                    return float(re.sub(r'[^\d.-]', '', v))
-
-                # 嘗試不同的關鍵字組合 (Goodinfo 有時候寫全名)
                 def get_val(keywords):
                     for k, v in text_map.items():
                         if any(kw in k for kw in keywords):
-                            return clean_val(v)
+                            val = re.sub(r'[^\d.-]', '', v)
+                            return float(val) if val else None
                     return None
 
                 data['GrossMargin'] = get_val(['毛利率'])
@@ -81,30 +77,58 @@ def get_goodinfo_financials(stock_id):
                 data['ROA'] = get_val(['資產報酬率', 'ROA'])
                 data['EPS'] = get_val(['每股稅後盈餘', 'EPS'])
                 data['BPS'] = get_val(['每股淨值'])
-        
-        return data if data else None
+                break
+                
+        # 如果爬下來是空的，視為失敗
+        if not data: raise Exception("Empty Data")
 
     except Exception as e:
-        print(f"Goodinfo Fin Error: {e}")
-        return None
+        # --- 嘗試 2: yfinance 備援 ---
+        # Goodinfo 失敗，改用 yfinance 的 info
+        source = "Yahoo (備援)"
+        # yfinance 的數據通常是小數 (0.5)，需轉成百分比 (50.0)
+        def get_yf_pct(key):
+            val = info.get(key)
+            return val * 100 if val is not None else None
+            
+        data['GrossMargin'] = get_yf_pct('grossMargins')
+        data['OpMargin'] = get_yf_pct('operatingMargins')
+        data['NetMargin'] = get_yf_pct('profitMargins')
+        data['ROE'] = get_yf_pct('returnOnEquity')
+        data['ROA'] = get_yf_pct('returnOnAssets')
+        data['EPS'] = info.get('trailingEps')
+        data['BPS'] = info.get('bookValue')
+
+    return data, source
 
 def get_goodinfo_equity(stock_id):
-    """爬取 Goodinfo 股權分散表"""
+    """
+    爬取 Goodinfo 股權分散表
+    (因為 Yahoo API 沒有這項數據，若失敗只能回傳 None)
+    """
     clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
     url = f"https://goodinfo.tw/tw/EquityDistributionClassHis.asp?STOCK_ID={clean_id}&CHT_CAT=WEEK"
-    headers = { "User-Agent": "Mozilla/5.0", "Referer": "https://goodinfo.tw/" }
+    headers = { 
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://goodinfo.tw/"
+    }
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=6)
         r.encoding = "utf-8"
+        if len(r.text) < 1000: return None
+        
         dfs = pd.read_html(io.StringIO(r.text))
         for df in dfs:
             df_str = df.to_string()
             if "週別" in df_str and "400張以上" in df_str:
                 latest = df.iloc[0]; prev = df.iloc[1]
+                # 簡單化處理欄位
                 flat_cols = [''.join(str(c) for c in col) for col in df.columns]
                 df.columns = flat_cols
+                
                 big_col = [c for c in df.columns if "400張以上" in c and "比例" in c]
                 hold_col = [c for c in df.columns if "股東人數" in c]
+                
                 if big_col and hold_col:
                     curr_big = float(latest[big_col[0]])
                     return {
@@ -118,11 +142,10 @@ def get_goodinfo_equity(stock_id):
     return None
 
 def get_yahoo_web_scraper(stock_id):
-    """[備援] 抓取 Yahoo 財務數據"""
     headers = { "User-Agent": "Mozilla/5.0" }
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=5)
         r.encoding = 'utf-8'
         soup = BeautifulSoup(r.text, 'html.parser')
         data = {}
@@ -149,7 +172,6 @@ def get_yahoo_web_scraper(stock_id):
     except: return {'Name': stock_id, 'PE': None, 'PB': None, 'Yield': None}
 
 def get_financial_data(stock_id, info):
-    """整合 yfinance 與爬蟲數據"""
     pe = info.get('trailingPE')
     pb = info.get('priceToBook')
     div_yield = info.get('dividendYield')
@@ -217,7 +239,7 @@ def calculate_technicals(df):
     return df
 
 # ==========================================
-# 📝 報告生成引擎 (Full Integration)
+# 📝 報告生成引擎 (Hybrid Integration)
 # ==========================================
 def generate_full_analysis(stock_id):
     stock = yf.Ticker(stock_id)
@@ -231,8 +253,12 @@ def generate_full_analysis(stock_id):
     fin_data = get_financial_data(stock_id, info)
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
+    
+    # ✅ 混合式財務數據：先抓 Goodinfo，失敗則切換 Yahoo
+    adv_fin, fin_source = get_financials_hybrid(stock_id, info)
+    
+    # 籌碼分散 (這個若失敗就只能 None)
     goodinfo_chip = get_goodinfo_equity(stock_id)
-    goodinfo_fin = get_goodinfo_financials(stock_id) # ✅ 新增 Goodinfo 財務
     
     raw_summary = info.get('longBusinessSummary', '')
     zh_summary = translate_to_chinese(raw_summary)
@@ -247,12 +273,11 @@ def generate_full_analysis(stock_id):
     if today['Close'] > today['MA60']: score += 10; reasons.append("站穩季線，長多格局")
     else: score -= 10
     
-    # 基本面 (Goodinfo 加分)
-    if goodinfo_fin:
-        if goodinfo_fin.get('GrossMargin') and goodinfo_fin['GrossMargin'] > 30:
-            score += 5; reasons.append(f"毛利率高 ({goodinfo_fin['GrossMargin']}%)，具競爭力")
-        if goodinfo_fin.get('ROE') and goodinfo_fin['ROE'] > 15:
-            score += 5; reasons.append(f"ROE 優異 ({goodinfo_fin['ROE']}%)，獲利效率高")
+    # 基本面 (Hybrid)
+    if adv_fin.get('GrossMargin') and adv_fin['GrossMargin'] > 30:
+        score += 5; reasons.append(f"毛利率高 ({adv_fin['GrossMargin']:.1f}%)")
+    if adv_fin.get('ROE') and adv_fin['ROE'] > 15:
+        score += 5; reasons.append(f"ROE 優異 ({adv_fin['ROE']:.1f}%)")
             
     # 籌碼面
     chip_status = "數據不足"
@@ -262,7 +287,7 @@ def generate_full_analysis(stock_id):
         elif chips['trust'] > 0: score += 10; chip_status = "投信認養"
     
     if goodinfo_chip:
-        if goodinfo_chip['big_change'] > 0: score += 10; reasons.append("大戶持股增加，籌碼集中")
+        if goodinfo_chip['big_change'] > 0: score += 10; reasons.append("大戶持股增加")
         elif goodinfo_chip['big_change'] < -0.2: score -= 10; reasons.append("大戶持股鬆動")
             
     if insider and insider > 20: score += 5; reasons.append("董監持股高")
@@ -276,23 +301,25 @@ def generate_full_analysis(stock_id):
     outlook_text = {"catalysts": [], "risks": [], "thesis": ""}
     
     # 催化劑
-    if goodinfo_chip and goodinfo_chip['big_change'] > 0: outlook_text["catalysts"].append(f"**籌碼沉澱**：大戶持股上升，主力吸籌明顯。")
-    if goodinfo_fin and goodinfo_fin.get('GrossMargin', 0) > 40: outlook_text["catalysts"].append(f"**護城河優勢**：毛利率達 {goodinfo_fin['GrossMargin']}%，產品定價能力強。")
-    if chips and chips['trust'] > 0: outlook_text["catalysts"].append("**投信作帳**：投信近期買超，有利股價支撐。")
+    if goodinfo_chip and goodinfo_chip['big_change'] > 0: outlook_text["catalysts"].append(f"**籌碼沉澱**：主力持續吸籌，大戶持股比例上升。")
+    if adv_fin.get('GrossMargin', 0) > 40: outlook_text["catalysts"].append(f"**護城河優勢**：毛利率達 {adv_fin['GrossMargin']:.1f}%，顯示產品具備強大定價權。")
+    if chips and chips['trust'] > 0: outlook_text["catalysts"].append("**投信作帳**：投信近期買超，季底作帳行情可期。")
+    if today['Close'] > today['MA60']: outlook_text["catalysts"].append("**多頭架構**：股價位於季線之上，長線趨勢偏多。")
     if not outlook_text["catalysts"]: outlook_text["catalysts"].append("**等待訊號**：目前缺乏明確攻擊訊號。")
 
     # 風險
-    if today['RSI'] > 75: outlook_text["risks"].append("**指標過熱**：RSI 過高，短線可能回檔。")
-    if fin_data['PE'] and float(fin_data['PE']) > 35: outlook_text["risks"].append("**估值偏高**：本益比處於高檔，需留意修正。")
+    if today['RSI'] > 75: outlook_text["risks"].append("**指標過熱**：RSI 指標過高，短線可能修正。")
+    if fin_data['PE'] and float(fin_data['PE']) > 35: outlook_text["risks"].append("**估值偏高**：本益比高於市場平均，需留意修正風險。")
     if not outlook_text["risks"]: outlook_text["risks"].append("**系統風險**：留意大盤波動。")
     
-    outlook_text["thesis"] = f"綜合分析，{fin_data['Name']} 評分為 **{score} 分**。基本面顯示{'獲利能力強勁' if goodinfo_fin and goodinfo_fin.get('ROE',0) > 10 else '獲利平穩'}。建議關注 **{verdict.split('(')[0]}**。"
+    outlook_text["thesis"] = f"綜合分析，{fin_data['Name']} 評分為 **{score} 分**。基本面顯示{'獲利能力強勁' if adv_fin.get('ROE',0) > 10 else '獲利平穩'}。建議關注 **{verdict.split('(')[0]}**。"
 
     return {
         "id": stock_id, "name": fin_data['Name'], "price": today['Close'], "score": score,
         "verdict": verdict, "color": color, "reasons": reasons,
         "fin": fin_data, "chips": chips, "chip_status": chip_status,
-        "insider": insider, "goodinfo_chip": goodinfo_chip, "goodinfo_fin": goodinfo_fin,
+        "insider": insider, "goodinfo_chip": goodinfo_chip, "adv_fin": adv_fin,
+        "fin_source": fin_source, # 標記數據來源
         "today": today, "info": info, "zh_summary": zh_summary,
         "outlook": outlook_text
     }
@@ -324,7 +351,8 @@ if run_btn and user_input:
         m1.metric("綜合信念評分", f"{data['score']} / 100")
         m2.metric("投資建議", data['verdict'].split(' ')[0])
         m3.metric("最新收盤價", f"{data['price']:.2f}")
-        m4.caption("來源：Yahoo + Goodinfo + MOPS")
+        m4.caption(f"數據來源：{data['fin_source']}") # 顯示目前是用 Goodinfo 還是 Yahoo
+        
         st.info(f"系統建議：**{data['verdict'].split('(')[0]}**。關鍵因素：**{data['reasons'][0] if data['reasons'] else '中性'}**。")
 
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏢 商業與基本面", "💰 財務與估值", "🏦 股權與籌碼", "📈 技術分析", "⚖️ 未來展望與戰略"])
@@ -337,8 +365,8 @@ if run_btn and user_input:
             
         with tab2:
             st.subheader("財務績效 (Financials)")
+            st.caption(f"此頁數據來源：{data['fin_source']}")
             
-            # 第一區：估值與殖利率
             f1, f2, f3 = st.columns(3)
             pe = f"{data['fin']['PE']:.2f}" if data['fin']['PE'] else "N/A"
             pb = f"{data['fin']['PB']:.2f}" if data['fin']['PB'] else "N/A"
@@ -347,33 +375,28 @@ if run_btn and user_input:
 
             st.divider()
             
-            # ✅ 新增：Goodinfo 詳細獲利能力
-            st.markdown("#### 📊 獲利能力與經營績效 (Goodinfo)")
-            if data['goodinfo_fin']:
-                gf = data['goodinfo_fin']
-                g1, g2, g3, g4 = st.columns(4)
-                
-                # 數據清理：如果是 None 顯示 N/A
-                def fmt(v, suffix='%'): return f"{v}{suffix}" if v is not None else "N/A"
-                
-                g1.metric("毛利率", fmt(gf.get('GrossMargin')), help="產品競爭力指標")
-                g2.metric("營業利益率", fmt(gf.get('OpMargin')), help="本業獲利能力")
-                g3.metric("稅後淨利率", fmt(gf.get('NetMargin')), help="最終獲利能力")
-                g4.metric("ROE (股東權益報酬率)", fmt(gf.get('ROE')), help="巴菲特最愛指標")
-                
-                st.write("") # Spacer
-                
-                g5, g6, g7, g8 = st.columns(4)
-                g5.metric("EPS (每股盈餘)", fmt(gf.get('EPS'), ' 元'))
-                g6.metric("每股淨值 (BPS)", fmt(gf.get('BPS'), ' 元'))
-                g7.metric("ROA (資產報酬率)", fmt(gf.get('ROA')))
-                g8.metric("參考來源", "Goodinfo")
-                
-            else:
-                st.warning("⚠️ 無法取得 Goodinfo 詳細財務數據，僅顯示基礎估值。")
+            st.markdown("#### 📊 獲利能力與經營績效")
+            gf = data['adv_fin'] # 使用混合數據
+            g1, g2, g3, g4 = st.columns(4)
+            
+            def fmt(v, suffix='%'): return f"{v:.2f}{suffix}" if v is not None else "N/A"
+            
+            g1.metric("毛利率", fmt(gf.get('GrossMargin')), help="越高越好")
+            g2.metric("營業利益率", fmt(gf.get('OpMargin')))
+            g3.metric("稅後淨利率", fmt(gf.get('NetMargin')))
+            g4.metric("ROE (權益報酬)", fmt(gf.get('ROE')))
+            
+            st.write("")
+            
+            g5, g6, g7, g8 = st.columns(4)
+            g5.metric("EPS (每股盈餘)", fmt(gf.get('EPS'), ' 元'))
+            g6.metric("每股淨值 (BPS)", fmt(gf.get('BPS'), ' 元'))
+            g7.metric("ROA (資產報酬)", fmt(gf.get('ROA')))
+            g8.caption("若 Goodinfo 封鎖，則使用 Yahoo 數據備援")
 
         with tab3:
             st.subheader("所有權與交易動態")
+            
             st.markdown("#### 📊 集保分佈 (Goodinfo)")
             if data['goodinfo_chip']:
                 gc = data['goodinfo_chip']
@@ -381,9 +404,8 @@ if run_btn and user_input:
                 g1.metric("400張以上大戶", f"{gc['big_percent']}%", f"{gc['big_change']:.2f}%")
                 g2.metric("股東人數", f"{gc['holders']} 人", f"{gc['holders_change']} 人", delta_color="inverse")
                 g3.caption(f"統計日期：{gc['date']}")
-                if gc['big_change'] > 0: st.success("🔥 籌碼集中 (大戶買)")
-                elif gc['big_change'] < 0: st.error("⚠️ 籌碼鬆動 (大戶賣)")
-            else: st.warning("無法連線至 Goodinfo")
+            else:
+                st.warning("⚠️ Goodinfo 阻擋了籌碼爬蟲，目前無法顯示大戶數據。")
             
             st.divider()
             c1, c2 = st.columns(2)
