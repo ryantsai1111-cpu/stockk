@@ -22,138 +22,93 @@ def translate_to_chinese(text):
         return GoogleTranslator(source='auto', target='zh-TW').translate(text)
     except: return text
 
-# 建立一個全局的 Session 來維持連線狀態 (對抗 Goodinfo)
+# 建立 Session 維持連線
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://goodinfo.tw/tw/StockDetail.asp"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 })
 
 # ==========================================
-# 🕵️‍♂️ 數據獲取層
+# 🕵️‍♂️ 數據獲取層 (Yahoo 全面接管)
 # ==========================================
 
-def get_goodinfo_financials(stock_id):
+def get_yahoo_financial_ratios(stock_id):
     """
-    [基本面] 強制爬取 Goodinfo 財務數據
-    策略：使用 Session 模擬連續瀏覽，並增加欄位容錯率
+    [新增] 爬取 Yahoo 股市 '財務比率' 頁面
+    替代 Goodinfo，抓取獲利能力數據 (不易被封鎖)
     """
-    clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
-    url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={clean_id}"
-    
     try:
-        # 第一次請求可能需要拿 Cookie
-        r = session.get(url, timeout=10)
-        r.encoding = "utf-8"
+        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/financial-ratios"
+        r = session.get(url, timeout=5)
+        soup = BeautifulSoup(r.text, 'html.parser')
         
-        # 檢查是否被擋 (內容太少就是被擋)
-        if len(r.text) < 1000:
-            return None, "Goodinfo (Blocked)"
-            
-        dfs = pd.read_html(io.StringIO(r.text))
         data = {}
         
-        # 遍歷表格找關鍵字
-        for df in dfs:
-            df_str = df.to_string()
-            # 尋找包含獲利能力的表格
-            if "毛利率" in df_str or "ROE" in df_str:
-                # 轉成文字字典以便搜索
-                text_map = {}
-                for idx, row in df.iterrows():
-                    for col in range(len(df.columns)-1):
-                        k = str(row[col])
-                        v = str(row[col+1])
-                        text_map[k] = v
-                
-                def get_val(keywords):
-                    for k, v in text_map.items():
-                        if any(kw in k for kw in keywords):
-                            # 清洗數據，只留數字和小數點
-                            val = re.sub(r'[^\d.-]', '', v)
-                            try:
-                                return float(val)
-                            except:
-                                return None
-                    return None
+        # Yahoo 的數據通常在 li 列表內，格式為 "毛利率 25.4%"
+        # 我們遍歷所有文字內容來抓取
+        text_content = soup.get_text()
+        
+        def extract_percent(keyword):
+            # 尋找 "毛利率" 後面的數字
+            # 模式：關鍵字 -> 可能有空格/冒號 -> 數字 -> %
+            pattern = re.compile(f"{keyword}.*?(-?\d+\.?\d+)%")
+            match = pattern.search(text_content)
+            return float(match.group(1)) if match else None
 
-                # 嘗試抓取
-                data['GrossMargin'] = get_val(['毛利率'])
-                data['OpMargin'] = get_val(['營業利益率', '營益率'])
-                data['NetMargin'] = get_val(['稅後淨利率', '淨利率'])
-                data['ROE'] = get_val(['股東權益報酬率', 'ROE'])
-                data['ROA'] = get_val(['資產報酬率', 'ROA'])
-                data['EPS'] = get_val(['每股稅後盈餘', 'EPS', '每股盈餘'])
-                data['BPS'] = get_val(['每股淨值'])
-                
-                # 只要抓到一個關鍵數據就算成功
-                if data.get('GrossMargin') is not None:
-                    return data, "Goodinfo"
-                    
-        return None, "Goodinfo (Parse Fail)"
-
+        data['GrossMargin'] = extract_percent("毛利率")
+        data['OpMargin'] = extract_percent("營業利益率")
+        data['NetMargin'] = extract_percent("稅後淨利率")
+        data['ROE'] = extract_percent("股東權益報酬率")
+        data['ROA'] = extract_percent("資產報酬率")
+        
+        # 抓取每股盈餘 (EPS) 和 每股淨值 (BPS)
+        # 這些通常在 "基本資料" 或 "財務比率" 的其他區塊，我們嘗試用 Regex 暴力搜
+        def extract_val(keyword):
+            pattern = re.compile(f"{keyword}.*?(-?\d+\.?\d+)")
+            match = pattern.search(text_content)
+            return float(match.group(1)) if match else None
+            
+        data['EPS'] = extract_val("每股盈餘")
+        data['BPS'] = extract_val("每股淨值")
+        
+        return data
     except Exception as e:
-        print(f"Goodinfo Error: {e}")
-        return None, "Goodinfo (Error)"
+        print(f"Yahoo Scraper Error: {e}")
+        return {}
 
 def get_histock_chips(stock_id):
-    """
-    [籌碼面] 從 HiStock (嗨投資) 抓取集保分佈
-    修正：不依賴 pd.read_html，改用 BeautifulSoup 手術刀解析
-    """
+    """[籌碼面] 從 HiStock 抓取集保分佈"""
     clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
     url = f"https://histock.tw/stock/large.aspx?no={clean_id}"
-    
     try:
         r = session.get(url, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # HiStock 的表格通常有特定的 class 或結構
-        # 我們直接找包含 "400張" 的那個表格
         tables = soup.find_all('table')
         target_table = None
-        
         for t in tables:
             if "400張" in t.text and "股東人數" in t.text:
                 target_table = t
                 break
         
         if target_table:
-            # 找到表格後，抓取所有的 tr (列)
             rows = target_table.find_all('tr')
-            # 排除標題列，取資料列 (通常第二列開始是最新一週)
-            # rows[0] 是標題, rows[1] 是最新週, rows[2] 是上週
             if len(rows) >= 3:
                 row_now = rows[1].find_all('td')
                 row_prev = rows[2].find_all('td')
-                
-                # HiStock 欄位順序可能會變，但通常是：
-                # 週別 | 收盤價 | ... | 400張比例 | ... | 股東人數 | ...
-                
-                # 我們用「欄位標題」來定位 index
                 headers = [th.text.strip() for th in rows[0].find_all('th')]
-                if not headers: # 有時候是 td
-                    headers = [td.text.strip() for td in rows[0].find_all('td')]
+                if not headers: headers = [td.text.strip() for td in rows[0].find_all('td')]
                 
-                idx_big = -1
-                idx_holders = -1
-                idx_date = 0
-                
+                idx_big = -1; idx_holders = -1; idx_date = 0
                 for i, h in enumerate(headers):
                     if "400張" in h and "%" in h: idx_big = i
                     if "人數" in h: idx_holders = i
                     if "期" in h or "周" in h or "日" in h: idx_date = i
                 
                 if idx_big != -1 and idx_holders != -1:
-                    # 抓數據
                     curr_big = float(row_now[idx_big].text.replace('%', '').strip())
                     prev_big = float(row_prev[idx_big].text.replace('%', '').strip())
-                    
                     curr_hold = int(row_now[idx_holders].text.replace(',', '').strip())
                     prev_hold = int(row_prev[idx_holders].text.replace(',', '').strip())
-                    
                     date_str = row_now[idx_date].text.strip()
                     
                     return {
@@ -164,16 +119,14 @@ def get_histock_chips(stock_id):
                         "holders": curr_hold,
                         "holders_change": curr_hold - prev_hold
                     }
-    except Exception as e:
-        print(f"HiStock Error: {e}")
-        return None
+    except: return None
     return None
 
-def get_yahoo_web_scraper(stock_id):
-    headers = { "User-Agent": "Mozilla/5.0" }
+def get_yahoo_basic_scraper(stock_id):
+    """抓取基本估值 (本益比/殖利率)"""
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
-        r = requests.get(url, headers=headers, timeout=5)
+        r = session.get(url, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
         data = {}
         try:
@@ -199,14 +152,13 @@ def get_yahoo_web_scraper(stock_id):
     except: return {'Name': stock_id, 'PE': None, 'PB': None, 'Yield': None}
 
 def get_financial_data(stock_id, info):
-    """Yahoo 基礎估值數據"""
     pe = info.get('trailingPE')
     pb = info.get('priceToBook')
     div_yield = info.get('dividendYield')
     if div_yield: div_yield = div_yield * 100
 
     if pe is None or pb is None or div_yield is None:
-        web_data = get_yahoo_web_scraper(stock_id)
+        web_data = get_yahoo_basic_scraper(stock_id)
         if pe is None: pe = web_data.get('PE')
         if pb is None: pb = web_data.get('PB')
         if div_yield is None: div_yield = web_data.get('Yield')
@@ -267,7 +219,7 @@ def calculate_technicals(df):
     return df
 
 # ==========================================
-# 📝 報告生成引擎 (v10.0 Final)
+# 📝 報告生成引擎 (v11.0 Yahoo Financials)
 # ==========================================
 def generate_full_analysis(stock_id):
     stock = yf.Ticker(stock_id)
@@ -281,16 +233,27 @@ def generate_full_analysis(stock_id):
     fin_data = get_financial_data(stock_id, info)
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
-    
-    # ✅ 強制抓取 Goodinfo (基本面)
-    adv_fin, fin_source_status = get_goodinfo_financials(stock_id)
-    
-    # ✅ 強制抓取 HiStock (籌碼面)
     histock_chip = get_histock_chips(stock_id)
     
-    # 若 Goodinfo 徹底失敗，至少給空字典以免報錯
-    if not adv_fin: adv_fin = {}
+    # ✅ 改用 Yahoo 財務比率爬蟲 (穩定不封鎖)
+    adv_fin = get_yahoo_financial_ratios(stock_id)
     
+    # 如果爬蟲失敗，嘗試用 yfinance info 補救
+    if not adv_fin.get('GrossMargin'):
+        def pct(v): return v*100 if v else None
+        adv_fin = {
+            'GrossMargin': pct(info.get('grossMargins')),
+            'OpMargin': pct(info.get('operatingMargins')),
+            'NetMargin': pct(info.get('profitMargins')),
+            'ROE': pct(info.get('returnOnEquity')),
+            'ROA': pct(info.get('returnOnAssets')),
+            'EPS': info.get('trailingEps'),
+            'BPS': info.get('bookValue')
+        }
+        fin_source = "yfinance (API)"
+    else:
+        fin_source = "Yahoo 股市 (Crawler)"
+
     raw_summary = info.get('longBusinessSummary', '')
     zh_summary = translate_to_chinese(raw_summary)
     
@@ -304,7 +267,7 @@ def generate_full_analysis(stock_id):
     if today['Close'] > today['MA60']: score += 10; reasons.append("站穩季線，長多格局")
     else: score -= 10
     
-    # 基本面 (Goodinfo)
+    # 基本面 (Yahoo Adv)
     if adv_fin.get('GrossMargin') and adv_fin['GrossMargin'] > 30:
         score += 5; reasons.append(f"毛利率高 ({adv_fin['GrossMargin']:.1f}%)")
     if adv_fin.get('ROE') and adv_fin['ROE'] > 15:
@@ -344,7 +307,6 @@ def generate_full_analysis(stock_id):
     if not outlook_text["risks"]: outlook_text["risks"].append("**系統風險**：留意大盤波動。")
     
     thesis_fin = '獲利能力強勁' if adv_fin.get('ROE',0) > 10 else '獲利平穩'
-    if not adv_fin: thesis_fin = "財務數據待確認"
     
     outlook_text["thesis"] = f"綜合分析，{fin_data['Name']} 評分為 **{score} 分**。基本面顯示{thesis_fin}。建議關注 **{verdict.split('(')[0]}**。"
 
@@ -355,7 +317,7 @@ def generate_full_analysis(stock_id):
         "insider": insider, 
         "histock_chip": histock_chip, 
         "adv_fin": adv_fin,
-        "fin_source_status": fin_source_status,
+        "fin_source": fin_source,
         "today": today, "info": info, "zh_summary": zh_summary,
         "outlook": outlook_text
     }
@@ -387,7 +349,7 @@ if run_btn and user_input:
         m1.metric("綜合信念評分", f"{data['score']} / 100")
         m2.metric("投資建議", data['verdict'].split(' ')[0])
         m3.metric("最新收盤價", f"{data['price']:.2f}")
-        m4.caption(f"來源狀態：{data['fin_source_status']}")
+        m4.caption(f"來源：HiStock + {data['fin_source']}")
         
         st.info(f"系統建議：**{data['verdict'].split('(')[0]}**。關鍵因素：**{data['reasons'][0] if data['reasons'] else '中性'}**。")
 
@@ -410,27 +372,24 @@ if run_btn and user_input:
 
             st.divider()
             
-            st.markdown(f"#### 📊 獲利能力與經營績效 (Goodinfo)")
-            if data['adv_fin']:
-                gf = data['adv_fin']
-                g1, g2, g3, g4 = st.columns(4)
-                
-                def fmt(v, suffix='%'): return f"{v:.2f}{suffix}" if v is not None else "N/A"
-                
-                g1.metric("毛利率", fmt(gf.get('GrossMargin')), help="越高越好")
-                g2.metric("營業利益率", fmt(gf.get('OpMargin')))
-                g3.metric("稅後淨利率", fmt(gf.get('NetMargin')))
-                g4.metric("ROE (權益報酬)", fmt(gf.get('ROE')))
-                
-                st.write("")
-                
-                g5, g6, g7, g8 = st.columns(4)
-                g5.metric("EPS (每股盈餘)", fmt(gf.get('EPS'), ' 元'))
-                g6.metric("每股淨值 (BPS)", fmt(gf.get('BPS'), ' 元'))
-                g7.metric("ROA (資產報酬)", fmt(gf.get('ROA')))
-                g8.caption(f"數據來源：{data['fin_source_status']}")
-            else:
-                st.warning(f"⚠️ 無法取得 Goodinfo 數據，狀態：{data['fin_source_status']}")
+            st.markdown(f"#### 📊 獲利能力與經營績效")
+            gf = data['adv_fin']
+            g1, g2, g3, g4 = st.columns(4)
+            
+            def fmt(v, suffix='%'): return f"{v:.2f}{suffix}" if v is not None else "N/A"
+            
+            g1.metric("毛利率", fmt(gf.get('GrossMargin')), help="越高越好")
+            g2.metric("營業利益率", fmt(gf.get('OpMargin')))
+            g3.metric("稅後淨利率", fmt(gf.get('NetMargin')))
+            g4.metric("ROE (權益報酬)", fmt(gf.get('ROE')))
+            
+            st.write("")
+            
+            g5, g6, g7, g8 = st.columns(4)
+            g5.metric("EPS (每股盈餘)", fmt(gf.get('EPS'), ' 元'))
+            g6.metric("每股淨值 (BPS)", fmt(gf.get('BPS'), ' 元'))
+            g7.metric("ROA (資產報酬)", fmt(gf.get('ROA')))
+            g8.caption(f"數據來源：{data['fin_source']}")
 
         with tab3:
             st.subheader("所有權與交易動態")
