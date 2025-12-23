@@ -6,6 +6,7 @@ import datetime
 import io
 import re
 from bs4 import BeautifulSoup
+from deep_translator import GoogleTranslator  # ✅ 新增翻譯模組
 
 # ==========================================
 # ⚙️ 網頁設定
@@ -13,95 +14,57 @@ from bs4 import BeautifulSoup
 st.set_page_config(page_title="帥哥城 AI 投顧", page_icon="📈", layout="wide")
 
 # ==========================================
-# 🕵️‍♂️ 數據獲取層 (強力修正版)
+# 🛠️ 工具函式：自動翻譯機
+# ==========================================
+def translate_to_chinese(text):
+    """將英文簡介翻譯成繁體中文"""
+    try:
+        if not text or len(text) < 5: return "暫無詳細業務描述。"
+        # 使用 Google 翻譯將內容轉為繁體中文 (zh-TW)
+        translated = GoogleTranslator(source='auto', target='zh-TW').translate(text)
+        return translated
+    except Exception as e:
+        return text  # 如果翻譯失敗，就顯示原文
+
+# ==========================================
+# 🕵️‍♂️ 數據獲取層
 # ==========================================
 
 def get_yahoo_web_scraper(stock_id):
-    """
-    [修正版] 抓取財務數據 (本益比/殖利率)
-    策略：遍歷所有 li 列表項目，使用 Regex 提取數字
-    """
+    """[備援] 抓取財務數據"""
     headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
         r = requests.get(url, headers=headers)
         r.encoding = 'utf-8'
         soup = BeautifulSoup(r.text, 'html.parser')
+        text = soup.get_text()
         
         data = {}
-        # 抓中文名
         try:
             title = soup.title.text
             match = re.search(r'^(.+?)\(', title)
             data['Name'] = match.group(1).strip() if match else stock_id
         except: data['Name'] = stock_id
 
-        # 抓數據 (針對 li 標籤進行精準打擊)
-        def find_val(keyword):
+        def search_val(keyword):
+            # 針對 li 標籤進行精準打擊
             try:
-                # Yahoo 數據通常放在 li 裡面
                 for item in soup.find_all('li'):
                     if keyword in item.text:
-                        # 使用 Regex 抓取數字 (包含小數點)
-                        # 排除文字，只抓 12.34 或 -12.34
                         match = re.search(r'(-?\d+\.\d+|-?\d+)', item.text)
-                        if match:
-                            return float(match.group(0))
+                        if match: return float(match.group(0))
             except: pass
             return None
 
-        data['PE'] = find_val("本益比")
-        data['PB'] = find_val("股價淨值比")
-        data['Yield'] = find_val("殖利率")
-        if data['Yield'] is None: data['Yield'] = find_val("現金殖利率")
+        data['PE'] = search_val("本益比")
+        data['PB'] = search_val("股價淨值比")
+        data['Yield'] = search_val("殖利率")
+        if data['Yield'] is None: data['Yield'] = search_val("現金殖利率")
         
         return data
     except:
         return {'Name': stock_id, 'PE': None, 'PB': None, 'Yield': None}
-
-def get_chinese_profile(stock_id):
-    """
-    [強力修正] 抓取中文公司簡介
-    策略：直接鎖定 '主要業務' 關鍵字，抓取其後的內容
-    """
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/profile"
-        headers = { "User-Agent": "Mozilla/5.0" }
-        r = requests.get(url, headers=headers)
-        r.encoding = 'utf-8'
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # 策略 1: 尋找包含 "主要業務" 的區塊
-        # Yahoo 的結構通常是：<div ...>主要業務</div><div ...>內容在這裡</div>
-        # 我們找所有文字包含 "主要業務" 的元素
-        targets = soup.find_all(string=re.compile("主要業務"))
-        
-        for target in targets:
-            # 往上找父層，再找包含內容的區塊
-            parent = target.parent
-            # 嘗試找這個區塊附近的文字
-            # 通常內容會在 parent 的下一個兄弟節點，或是 parent 的父層的文字
-            container = parent.find_next('div')
-            if container and len(container.text) > 10:
-                return container.text.strip()
-            
-            # 備用：如果是舊版結構，可能直接在後面的 span 或 div
-            next_sib = parent.find_next_sibling()
-            if next_sib and len(next_sib.text) > 10:
-                return next_sib.text.strip()
-
-        # 策略 2: 如果上面失敗，抓 Meta Description 但要清洗
-        meta = soup.find('meta', attrs={'name': 'description'})
-        if meta:
-            desc = meta.get('content', '')
-            # 清洗掉 Yahoo 的廣告詞
-            if "提供公司基本資料" in desc:
-                return "暫無詳細中文業務描述 (Yahoo 資料格式限制)"
-            return desc
-            
-        return "暫無中文業務描述"
-    except Exception as e:
-        return "暫無資料"
 
 def get_financial_data(stock_id, info):
     """[核心邏輯] 優先使用 yfinance"""
@@ -111,7 +74,6 @@ def get_financial_data(stock_id, info):
     
     if div_yield: div_yield = div_yield * 100
 
-    # 只要有缺漏，就啟動爬蟲補齊
     if pe is None or pb is None or div_yield is None:
         web_data = get_yahoo_web_scraper(stock_id)
         if pe is None: pe = web_data.get('PE')
@@ -164,7 +126,7 @@ def get_chips_yahoo_api(stock_id):
     except: return None
 
 # ==========================================
-# 📊 技術指標計算
+# 📊 技術指標
 # ==========================================
 
 def calculate_technicals(df):
@@ -199,13 +161,15 @@ def generate_full_analysis(stock_id):
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
     
-    # 呼叫修正後的中文爬蟲
-    zh_summary = get_chinese_profile(stock_id)
+    # ✅ 1. 抓取英文簡介
+    raw_summary = info.get('longBusinessSummary', '')
+    
+    # ✅ 2. 自動翻譯成中文
+    zh_summary = translate_to_chinese(raw_summary)
     
     score = 50
     reasons = []
     
-    # 評分邏輯
     price = today['Close']
     if price > today['MA20']: score += 10; reasons.append("股價站上月線，短多確立")
     else: score -= 10; reasons.append("股價跌破月線，短線整理")
@@ -244,7 +208,7 @@ def generate_full_analysis(stock_id):
         "insider": insider,
         "today": today,
         "info": info,
-        "zh_summary": zh_summary
+        "zh_summary": zh_summary # 翻譯後的簡介
     }
 
 # ==========================================
@@ -266,7 +230,7 @@ if run_btn and user_input:
     stock_code = user_input.strip().upper()
     if stock_code.isdigit(): stock_code += ".TW"
     
-    with st.spinner(f"正在分析 {stock_code} ..."):
+    with st.spinner(f"正在分析 {stock_code} 並翻譯財報數據..."):
         data = generate_full_analysis(stock_code)
         
     if data:
@@ -277,7 +241,7 @@ if run_btn and user_input:
         m2.metric("投資建議", data['verdict'].split(' ')[0])
         m3.metric("最新收盤價", f"{data['price']:.2f}")
         
-        source_note = "數據來源：yfinance + 網頁爬蟲"
+        source_note = "數據：yfinance (AI翻譯) + 爬蟲"
         m4.caption(source_note)
         
         st.info(f"""
@@ -296,11 +260,8 @@ if run_btn and user_input:
         
         with tab1:
             st.subheader("業務背景 (Business Context)")
-            # 這裡會顯示真正抓到的中文簡介，而不是 Yahoo 廣告詞
-            if "Yahoo" in data['zh_summary']:
-                st.warning("⚠️ 來源網站限制，無法取得完整中文描述。")
-            else:
-                st.write(data['zh_summary'])
+            # 顯示翻譯後的中文簡介
+            st.write(data['zh_summary'])
             
             st.markdown("---")
             industry = data['info'].get('industry', 'N/A')
@@ -310,7 +271,6 @@ if run_btn and user_input:
         with tab2:
             st.subheader("財務績效 (Financial Performance)")
             f1, f2, f3 = st.columns(3)
-            # 數據處理：如果是 None 顯示 N/A，否則顯示數字
             pe_val = f"{data['fin']['PE']:.2f}" if data['fin']['PE'] is not None else "N/A"
             pb_val = f"{data['fin']['PB']:.2f}" if data['fin']['PB'] is not None else "N/A"
             yld_val = f"{data['fin']['Yield']:.2f}%" if data['fin']['Yield'] is not None else "N/A"
@@ -354,6 +314,7 @@ if run_btn and user_input:
 
         with tab5:
             st.subheader("未來展望與風險")
+            # f-string 修正版
             st.markdown(f"""
             **私人投資者最終評估**：
             本系統建議採取 **【{data['verdict']}】** 策略。
