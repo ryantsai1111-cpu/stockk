@@ -271,3 +271,168 @@ def generate_full_analysis(stock_id):
     reasons = []
     
     if today['Close'] > today['MA20']: score += 10; reasons.append("股價站上月線，短多確立")
+    else: score -= 10; reasons.append("股價跌破月線，短線整理")
+    if today['Close'] > today['MA60']: score += 10; reasons.append("站穩季線，長多格局")
+    else: score -= 10
+    
+    if adv_fin.get('GrossMargin') and adv_fin['GrossMargin'] > 30:
+        score += 5; reasons.append(f"毛利率高 ({adv_fin['GrossMargin']:.1f}%)")
+    if adv_fin.get('ROE') and adv_fin['ROE'] > 15:
+        score += 5; reasons.append(f"ROE 優異 ({adv_fin['ROE']:.1f}%)")
+            
+    chip_status = "數據不足"
+    if chips:
+        if chips['foreign'] > 0 and chips['trust'] > 0: score += 15; chip_status = "土洋合一"; reasons.append("法人同步買超")
+        elif chips['foreign'] < 0 and chips['trust'] < 0: score -= 15; chip_status = "法人棄守"; reasons.append("法人同步賣超")
+        elif chips['trust'] > 0: score += 10; chip_status = "投信認養"
+    
+    if finmind_chip:
+        if finmind_chip['big_change'] > 0: score += 10; reasons.append("大戶持股增加")
+        elif finmind_chip['big_change'] < -0.2: score -= 10; reasons.append("大戶持股鬆動")
+            
+    if insider and insider > 20: score += 5; reasons.append("董監持股高")
+    score = max(0, min(100, score))
+    
+    if score >= 75: verdict = "強力買進 (Strong Buy)"; color = "green"
+    elif score >= 55: verdict = "持有/觀望 (Hold)"; color = "orange"
+    else: verdict = "賣出/避開 (Sell)"; color = "red"
+    
+    # --- 未來展望 ---
+    outlook_text = {"catalysts": [], "risks": [], "thesis": ""}
+    
+    if finmind_chip and finmind_chip['big_change'] > 0: outlook_text["catalysts"].append(f"**籌碼沉澱**：本週大戶持股增加 {finmind_chip['big_change']:.2f}%，主力吸籌。")
+    if adv_fin.get('GrossMargin', 0) > 40: outlook_text["catalysts"].append(f"**護城河優勢**：毛利率達 {adv_fin['GrossMargin']:.1f}%，產品競爭力強。")
+    if chips and chips['trust'] > 0: outlook_text["catalysts"].append("**投信作帳**：投信近期買超，有利支撐。")
+    if today['Close'] > today['MA60']: outlook_text["catalysts"].append("**多頭架構**：股價位於季線之上，長線看好。")
+    if not outlook_text["catalysts"]: outlook_text["catalysts"].append("**區間震盪**：缺乏明確攻擊訊號。")
+
+    if today['RSI'] > 75: outlook_text["risks"].append("**指標過熱**：RSI 過高，短線可能修正。")
+    if fin_data['PE'] and float(fin_data['PE']) > 35: outlook_text["risks"].append("**估值偏高**：本益比高於平均，需留意修正。")
+    if not outlook_text["risks"]: outlook_text["risks"].append("**系統風險**：留意大盤波動。")
+    
+    thesis_fin = '獲利能力強勁' if adv_fin.get('ROE',0) > 10 else '獲利平穩'
+    
+    outlook_text["thesis"] = f"綜合分析，{fin_data['Name']} 評分為 **{score} 分**。基本面顯示{thesis_fin}。建議關注 **{verdict.split('(')[0]}**。"
+
+    return {
+        "id": stock_id, "name": fin_data['Name'], "price": today['Close'], "score": score,
+        "verdict": verdict, "color": color, "reasons": reasons,
+        "fin": fin_data, "chips": chips, "chip_status": chip_status,
+        "insider": insider, 
+        "finmind_chip": finmind_chip, 
+        "adv_fin": adv_fin,
+        "today": today, "info": info, "zh_summary": zh_summary,
+        "outlook": outlook_text,
+        "fin_source": fin_source
+    }
+
+# ==========================================
+# 🖥️ UI 介面
+# ==========================================
+st.title("帥哥城 AI 投顧")
+st.markdown("### 🚀 機構級投資分析報告書")
+
+col1, col2 = st.columns([3, 1])
+with col1:
+    user_input = st.text_input("輸入代碼 (例如 2330, 2603)", "")
+with col2:
+    st.write("")
+    st.write("")
+    run_btn = st.button("生成報告", use_container_width=True)
+
+if run_btn and user_input:
+    stock_code = user_input.strip().upper()
+    if stock_code.isdigit(): stock_code += ".TW"
+    
+    with st.spinner("查詢中 (連接 FinMind API)..."):
+        data = generate_full_analysis(stock_code)
+        
+    if data:
+        st.header(f"1. 執行摘要：{data['name']} ({stock_code})")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("綜合信念評分", f"{data['score']} / 100")
+        m2.metric("投資建議", data['verdict'].split(' ')[0])
+        m3.metric("最新收盤價", f"{data['price']:.2f}")
+        m4.caption(f"數據來源：FinMind API + {data['fin_source']}")
+        
+        st.info(f"系統建議：**{data['verdict'].split('(')[0]}**。關鍵因素：**{data['reasons'][0] if data['reasons'] else '中性'}**。")
+
+        # 確保 Tabs 位於 if data: 區塊內，這樣才會在數據生成後顯示
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏢 商業與基本面", "💰 財務與估值", "🏦 股權與籌碼", "📈 技術分析", "⚖️ 未來展望與戰略"])
+        
+        with tab1:
+            st.subheader("業務背景")
+            st.write(data['zh_summary'])
+            st.markdown("---")
+            st.caption(f"產業：{data['info'].get('sector', 'N/A')} > {data['info'].get('industry', 'N/A')}")
+            
+        with tab2:
+            st.subheader("財務績效 (Financials)")
+            f1, f2, f3 = st.columns(3)
+            pe = f"{data['fin']['PE']:.2f}" if data['fin']['PE'] else "N/A"
+            pb = f"{data['fin']['PB']:.2f}" if data['fin']['PB'] else "N/A"
+            yld = f"{data['fin']['Yield']:.2f}%" if data['fin']['Yield'] else "N/A"
+            f1.metric("本益比 (P/E)", pe); f2.metric("股價淨值比 (P/B)", pb); f3.metric("殖利率", yld)
+
+            st.divider()
+            
+            st.markdown(f"#### 📊 獲利能力與經營績效")
+            gf = data['adv_fin']
+            g1, g2, g3, g4 = st.columns(4)
+            def fmt(v, suffix='%'): return f"{v:.2f}{suffix}" if v is not None else "N/A"
+            g1.metric("毛利率", fmt(gf.get('GrossMargin')), help="越高越好")
+            g2.metric("營業利益率", fmt(gf.get('OpMargin')))
+            g3.metric("稅後淨利率", fmt(gf.get('NetMargin')))
+            g4.metric("ROE (權益報酬)", fmt(gf.get('ROE')))
+            st.write("")
+            g5, g6, g7, g8 = st.columns(4)
+            g5.metric("EPS (每股盈餘)", fmt(gf.get('EPS'), ' 元'))
+            g6.metric("每股淨值 (BPS)", fmt(gf.get('BPS'), ' 元'))
+            g7.metric("ROA (資產報酬)", fmt(gf.get('ROA')))
+            g8.caption(f"數據來源：{data['fin_source']}")
+
+        with tab3:
+            st.subheader("所有權與交易動態")
+            
+            # ✅ FinMind 數據展示區
+            st.markdown("#### 📊 集保分佈 (FinMind API)")
+            if data['finmind_chip']:
+                fc = data['finmind_chip']
+                g1, g2, g3 = st.columns(3)
+                g1.metric("400張以上大戶", f"{fc['big_percent']:.2f}%", f"{fc['big_change']:.2f}%")
+                g2.metric("股東人數", f"{fc['holders']} 人", f"{fc['holders_change']} 人", delta_color="inverse")
+                g3.caption(f"統計日期：{fc['date']}")
+                if fc['big_change'] > 0: st.success("🔥 籌碼集中 (大戶買)")
+                elif fc['big_change'] < 0: st.error("⚠️ 籌碼鬆動 (大戶賣)")
+            else:
+                st.warning("⚠️ FinMind 資料庫更新中，暫無本週資料。")
+            
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("#### 🏛️ 三大法人")
+                if data['chips']: st.json(data['chips'])
+            with c2:
+                st.markdown("#### 👔 內部人持股")
+                if data['insider']: st.metric("董監持股", f"{data['insider']}%")
+
+        with tab4:
+            st.subheader("技術分析")
+            t1, t2, t3 = st.columns(3)
+            t1.metric("RSI (14)", f"{data['today']['RSI']:.2f}")
+            t2.metric("MACD", f"{data['today']['MACD'] - data['today']['Signal']:.2f}")
+            t3.metric("月線乖離", f"{data['price'] - data['today']['MA20']:.2f}")
+
+        with tab5:
+            st.subheader("未來展望與戰略催化劑")
+            st.markdown(f"**分析日期**：{datetime.date.today()}")
+            st.markdown("#### 1. 戰略催化劑")
+            for i in data['outlook']['catalysts']: st.markdown(f"- {i}")
+            st.markdown("#### 2. 風險矩陣")
+            for i in data['outlook']['risks']: st.markdown(f"- ⚠️ {i}")
+            st.markdown("#### 3. 綜合投資論述")
+            st.info(data['outlook']['thesis'])
+            st.caption("*(免責聲明：本報告由 AI 自動生成，僅供參考)*")
+
+    else:
+        st.error(f"❌ 查無代碼 {stock_code}")
