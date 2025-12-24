@@ -13,6 +13,12 @@ from deep_translator import GoogleTranslator
 # ==========================================
 st.set_page_config(page_title="帥哥城 AI 投顧", page_icon="📈", layout="wide")
 
+# 建立 Session 維持連線
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
+
 # ==========================================
 # 🛠️ 工具函式
 # ==========================================
@@ -22,14 +28,8 @@ def translate_to_chinese(text):
         return GoogleTranslator(source='auto', target='zh-TW').translate(text)
     except: return text
 
-# 建立 Session 維持連線 (用於 Yahoo 爬蟲)
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
-
 # ==========================================
-# 🕵️‍♂️ 數據獲取層 (FinMind + Yahoo API)
+# 🕵️‍♂️ 數據獲取層 (FinMind + Yahoo)
 # ==========================================
 
 def get_finmind_equity(stock_id):
@@ -40,8 +40,8 @@ def get_finmind_equity(stock_id):
     """
     clean_id = stock_id.replace(".TW", "").replace(".TWO", "")
     
-    # 設定日期範圍 (抓過去 60 天以確保有資料)
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
+    # 設定抓取過去 90 天資料，確保能跨週比較
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
     
     url = "https://api.finmindtrade.com/api/v4/data"
     parameter = {
@@ -56,37 +56,31 @@ def get_finmind_equity(stock_id):
         
         if not data: return None
         
-        # 轉成 DataFrame 處理
         df = pd.DataFrame(data)
-        
-        # 確保日期格式正確並排序
         df['date'] = pd.to_datetime(df['date'])
+        
+        # 取得所有可用日期
         dates = sorted(df['date'].unique())
+        if len(dates) < 2: return None 
         
-        if len(dates) < 2: return None # 資料不足兩週無法比較
-        
-        # 取最近兩週的日期
+        # 取最近兩期 (本週 vs 上週)
         latest_date = dates[-1]
         prev_date = dates[-2]
         
         df_latest = df[df['date'] == latest_date]
         df_prev = df[df['date'] == prev_date]
         
-        # 計算總股東人數 (加總所有等級的人數)
+        # 計算總股東人數
         holders_now = df_latest['numberOfShareholders'].sum()
         holders_prev = df_prev['numberOfShareholders'].sum()
         
         # 計算 400 張以上大戶比例
-        # FinMind 的 HoldingSharesLevel 分級：
-        # 等級 13 通常是 400,001-600,000 股
-        # 所以我們加總 Level >= 13 的比例
-        # (注意：FinMind 每個等級定義可能微調，但 >=13 通常涵蓋 400張以上)
-        
+        # FinMind 等級 16 對應 400,001-600,000 股
+        # 我們加總等級 >= 16 的比例 (嚴格定義 > 400張)
         def calc_big_percent(dframe):
-            # 確保等級是數字
             dframe['HoldingSharesLevel'] = pd.to_numeric(dframe['HoldingSharesLevel'], errors='coerce')
-            # 篩選 Level >= 13 (即 > 400張)
-            big_df = dframe[dframe['HoldingSharesLevel'] >= 13]
+            # 16級以上是大戶
+            big_df = dframe[dframe['HoldingSharesLevel'] >= 16]
             return big_df['percentage'].sum()
             
         big_now = calc_big_percent(df_latest)
@@ -232,7 +226,7 @@ def calculate_technicals(df):
     return df
 
 # ==========================================
-# 📝 報告生成引擎 (v12.0)
+# 📝 報告生成引擎 (v12.0 Final)
 # ==========================================
 def generate_full_analysis(stock_id):
     stock = yf.Ticker(stock_id)
@@ -247,13 +241,13 @@ def generate_full_analysis(stock_id):
     chips = get_chips_yahoo_api(stock_id)
     insider = get_mops_insider(stock_id)
     
-    # ✅ 1. 使用 FinMind API 抓籌碼 (最穩)
+    # ✅ 1. FinMind API 抓籌碼
     finmind_chip = get_finmind_equity(stock_id)
     
-    # ✅ 2. 使用 Yahoo 爬蟲抓財務三率 (最穩)
+    # ✅ 2. Yahoo 財務比率爬蟲
     adv_fin = get_yahoo_financial_ratios(stock_id)
     
-    # 若爬蟲失敗，用 yfinance 補
+    # 補強財務數據
     if not adv_fin.get('GrossMargin'):
         def pct(v): return v*100 if v else None
         adv_fin = {
@@ -265,92 +259,15 @@ def generate_full_analysis(stock_id):
             'EPS': info.get('trailingEps'),
             'BPS': info.get('bookValue')
         }
+        fin_source = "yfinance (API)"
+    else:
+        fin_source = "Yahoo 股市 (Crawler)"
 
     raw_summary = info.get('longBusinessSummary', '')
     zh_summary = translate_to_chinese(raw_summary)
     
-    # --- 評分系統 ---
+    # --- 評分 ---
     score = 50
     reasons = []
     
     if today['Close'] > today['MA20']: score += 10; reasons.append("股價站上月線，短多確立")
-    else: score -= 10; reasons.append("股價跌破月線，短線整理")
-    if today['Close'] > today['MA60']: score += 10; reasons.append("站穩季線，長多格局")
-    else: score -= 10
-    
-    if adv_fin.get('GrossMargin') and adv_fin['GrossMargin'] > 30:
-        score += 5; reasons.append(f"毛利率高 ({adv_fin['GrossMargin']:.1f}%)")
-    if adv_fin.get('ROE') and adv_fin['ROE'] > 15:
-        score += 5; reasons.append(f"ROE 優異 ({adv_fin['ROE']:.1f}%)")
-            
-    chip_status = "數據不足"
-    if chips:
-        if chips['foreign'] > 0 and chips['trust'] > 0: score += 15; chip_status = "土洋合一"; reasons.append("法人同步買超")
-        elif chips['foreign'] < 0 and chips['trust'] < 0: score -= 15; chip_status = "法人棄守"; reasons.append("法人同步賣超")
-        elif chips['trust'] > 0: score += 10; chip_status = "投信認養"
-    
-    if finmind_chip:
-        if finmind_chip['big_change'] > 0: score += 10; reasons.append("大戶持股增加")
-        elif finmind_chip['big_change'] < -0.2: score -= 10; reasons.append("大戶持股鬆動")
-            
-    if insider and insider > 20: score += 5; reasons.append("董監持股高")
-    score = max(0, min(100, score))
-    
-    if score >= 75: verdict = "強力買進 (Strong Buy)"; color = "green"
-    elif score >= 55: verdict = "持有/觀望 (Hold)"; color = "orange"
-    else: verdict = "賣出/避開 (Sell)"; color = "red"
-    
-    # --- 未來展望 ---
-    outlook_text = {"catalysts": [], "risks": [], "thesis": ""}
-    
-    if finmind_chip and finmind_chip['big_change'] > 0: outlook_text["catalysts"].append(f"**籌碼沉澱**：本週大戶持股增加 {finmind_chip['big_change']:.2f}%，主力吸籌。")
-    if adv_fin.get('GrossMargin', 0) > 40: outlook_text["catalysts"].append(f"**護城河優勢**：毛利率達 {adv_fin['GrossMargin']:.1f}%，產品競爭力強。")
-    if chips and chips['trust'] > 0: outlook_text["catalysts"].append("**投信作帳**：投信近期買超，有利支撐。")
-    if today['Close'] > today['MA60']: outlook_text["catalysts"].append("**多頭架構**：股價位於季線之上，長線看好。")
-    if not outlook_text["catalysts"]: outlook_text["catalysts"].append("**區間震盪**：缺乏明確攻擊訊號。")
-
-    if today['RSI'] > 75: outlook_text["risks"].append("**指標過熱**：RSI 過高，短線可能修正。")
-    if fin_data['PE'] and float(fin_data['PE']) > 35: outlook_text["risks"].append("**估值偏高**：本益比高於平均，需留意修正。")
-    if not outlook_text["risks"]: outlook_text["risks"].append("**系統風險**：留意大盤波動。")
-    
-    thesis_fin = '獲利能力強勁' if adv_fin.get('ROE',0) > 10 else '獲利平穩'
-    
-    outlook_text["thesis"] = f"綜合分析，{fin_data['Name']} 評分為 **{score} 分**。基本面顯示{thesis_fin}。建議關注 **{verdict.split('(')[0]}**。"
-
-    return {
-        "id": stock_id, "name": fin_data['Name'], "price": today['Close'], "score": score,
-        "verdict": verdict, "color": color, "reasons": reasons,
-        "fin": fin_data, "chips": chips, "chip_status": chip_status,
-        "insider": insider, 
-        "finmind_chip": finmind_chip, # FinMind 數據
-        "adv_fin": adv_fin,
-        "today": today, "info": info, "zh_summary": zh_summary,
-        "outlook": outlook_text
-    }
-
-# ==========================================
-# 🖥️ UI 介面
-# ==========================================
-st.title("帥哥城 AI 投顧")
-st.markdown("### 🚀 機構級投資分析報告書")
-
-col1, col2 = st.columns([3, 1])
-with col1:
-    user_input = st.text_input("輸入代碼 (例如 2330, 2603)", "")
-with col2:
-    st.write("")
-    st.write("")
-    run_btn = st.button("生成報告", use_container_width=True)
-
-if run_btn and user_input:
-    stock_code = user_input.strip().upper()
-    if stock_code.isdigit(): stock_code += ".TW"
-    
-    with st.spinner("查詢中 (連接 FinMind API)..."):
-        data = generate_full_analysis(stock_code)
-        
-    if data:
-        st.header(f"1. 執行摘要：{data['name']} ({stock_code})")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("綜合信念評分", f"{data['score']} / 100")
-        m2.metric("投資建議", data['verdict'].split(' ')[0])
