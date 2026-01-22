@@ -8,7 +8,17 @@ import google.generativeai as genai
 # ==========================================
 # 深度整合版 Prompt (融合您上傳的所有技術分析文件)
 # ==========================================
-def get_stock_analysis_prompt(company_name, ticker, current_date):
+# === 診斷代碼 (測試用，確認後可刪除) ===
+import streamlit as st
+try:
+    test_key = st.secrets.get("GOOGLE_API_KEY")
+    if not test_key:
+        st.error("❌ 錯誤：Secrets 裡面找不到 'GOOGLE_API_KEY'。請檢查拼字。")
+    else:
+        st.success(f"✅ 成功：已偵測到 API Key (開頭為: {test_key[:5]}...)")
+except FileNotFoundError:
+    st.error("❌ 錯誤：找不到 secrets.toml 檔案。")
+# ========================================def get_stock_analysis_prompt(company_name, ticker, current_date):
     next_year_date = (datetime.strptime(current_date, "%Y-%m-%d") + timedelta(days=365)).strftime("%Y-%m-%d")
 
     base_prompt = f"""
@@ -186,3 +196,4 @@ if 'report' in st.session_state:
     # 2. 完整報告區域
     st.subheader("📝 深度分析報告")
     st.markdown(st.session_state['report'])
+
