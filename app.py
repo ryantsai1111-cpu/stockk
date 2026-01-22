@@ -112,4 +112,140 @@ def calculate_technical_score(df):
     # 3. MACD
     if last['MACD_Hist'] > 0:
         score += 10
-        if last['MACD_Hist'] > prev['MACD_
+        if last['MACD_Hist'] > prev['MACD_Hist']:
+            reasons.append("✅ MACD 紅柱放大 (動能強)")
+    else:
+        score -= 10
+        
+    # 4. 布林通道
+    if last['Close'] > last['BB_Up']:
+        reasons.append("⚠️ 觸及布林上軌 (短線過熱，小心拉回)")
+    elif last['Close'] < last['BB_Low']:
+        reasons.append("⚠️ 觸及布林下軌 (超賣，有機會反彈)")
+
+    # 限制分數 0-100
+    score = max(0, min(100, score))
+    
+    # 產生總結
+    if score >= 75:
+        signal = "積極買進 (Strong Buy)"
+        color = "red" # 台股紅是漲
+    elif score >= 60:
+        signal = "偏多操作 (Buy)"
+        color = "red"
+    elif score <= 25:
+        signal = "快逃 / 做空 (Strong Sell)"
+        color = "green" # 台股綠是跌
+    elif score <= 40:
+        signal = "保守觀望 (Sell/Hold)"
+        color = "green"
+    else:
+        signal = "區間盤整 (Neutral)"
+        color = "gray"
+        
+    return df, score, signal, color, reasons
+
+# ==========================================
+# UI 介面設計
+# ==========================================
+st.set_page_config(page_title="台股速評助手", layout="wide", page_icon="📈")
+
+# 標題區
+st.title("📈 台股速評助手")
+st.markdown("輸入代號，立刻幫你判斷現在該買還是該賣。")
+
+# 搜尋欄 (置頂，方便手機操作)
+col_input, col_btn = st.columns([3, 1])
+with col_input:
+    ticker_input = st.text_input("輸入股票代號", value="2330", placeholder="例如: 2330, 2603")
+with col_btn:
+    st.write("") # 排版用
+    st.write("") 
+    run_btn = st.button("🔍 立即分析", type="primary")
+
+if run_btn:
+    ticker = format_ticker(ticker_input)
+    
+    with st.spinner(f"正在分析 {ticker} 的基本面與籌碼..."):
+        try:
+            # 1. 抓資料
+            df = yf.download(ticker, period="6mo") # 抓半年資料就好，比較快
+            fundamentals = get_fundamentals(ticker)
+            
+            if df.empty:
+                st.error(f"❌ 找不到 {ticker} 的資料，請確認代號是否正確。")
+                st.stop()
+                
+            # 處理 MultiIndex
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # 2. 計算
+            df, score, signal, color, reasons = calculate_technical_score(df)
+            last_price = df.iloc[-1]['Close']
+            change = last_price - df.iloc[-2]['Close']
+            pct_change = (change / df.iloc[-2]['Close']) * 100
+            
+            # ================= 顯示結果區 =================
+            st.markdown("---")
+            
+            # --- 區域 A: 大標題結論 (給沒時間的人看) ---
+            c1, c2 = st.columns([1, 2])
+            
+            with c1:
+                st.metric("目前股價", f"{last_price:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
+            
+            with c2:
+                # 根據顏色顯示不同風格的警示
+                if color == "red":
+                    st.success(f"### 🎯 結論：{signal}")
+                elif color == "green":
+                    st.error(f"### 🎯 結論：{signal}")
+                else:
+                    st.warning(f"### 🎯 結論：{signal}")
+                
+                st.progress(score)
+                st.caption(f"多空綜合分數：{score} 分 (分數越高越適合買進)")
+
+            # --- 區域 B: 基本面數據 (新增功能) ---
+            st.subheader("📊 基本面體質")
+            if fundamentals:
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("EPS (每股盈餘)", fundamentals['eps'])
+                f2.metric("本益比 (PE)", fundamentals['pe_ratio'])
+                f3.metric("殖利率 (Yield)", fundamentals['yield'])
+                f4.metric("ROE (股東權益報酬率)", fundamentals['roe'])
+            else:
+                st.info("查無基本面資料，可能為 ETF 或資料源缺失。")
+
+            # --- 區域 C: 為什麼這樣判斷？ (關鍵原因) ---
+            with st.expander("💡 為什麼 AI 給這個建議？點擊查看細節"):
+                for reason in reasons:
+                    st.write(reason)
+            
+            # --- 區域 D: K線圖 (視覺化) ---
+            st.subheader("📈 走勢圖表")
+            
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.1, row_heights=[0.7, 0.3])
+
+            # K線
+            fig.add_trace(go.Candlestick(x=df.index,
+                            open=df['Open'], high=df['High'],
+                            low=df['Low'], close=df['Close'],
+                            name='K線'), row=1, col=1)
+            
+            # 均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='季線'), row=1, col=1)
+            
+            # KD值
+            fig.add_trace(go.Scatter(x=df.index, y=df['K'], line=dict(color='red', width=1), name='K值'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['D'], line=dict(color='green', width=1), name='D值'), row=2, col=1)
+
+            fig.update_layout(height=600, xaxis_rangeslider_visible=False, 
+                              title_text=f"{fundamentals['name'] if fundamentals else ticker} - 技術分析圖")
+            st.plotly_chart(fig, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"發生未預期的錯誤：{e}")
