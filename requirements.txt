@@ -7,3 +7,6 @@ lxml
 html5lib
 deep-translator
 google-generativeai
+numpy
+plotly
+ta
