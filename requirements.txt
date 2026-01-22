@@ -6,4 +6,4 @@ beautifulsoup4
 lxml
 html5lib
 deep-translator
-openai
+google-generativeai
