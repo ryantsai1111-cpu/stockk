@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import google.generativeai as genai
 
 # ==========================================
-# 深度整合版 Prompt (融合道氏理論、KD+MACD、葛蘭碧法則)
+# 深度整合版 Prompt (融合您上傳的所有技術分析文件)
 # ==========================================
 def get_stock_analysis_prompt(company_name, ticker, current_date):
     next_year_date = (datetime.strptime(current_date, "%Y-%m-%d") + timedelta(days=365)).strftime("%Y-%m-%d")
@@ -14,48 +14,49 @@ def get_stock_analysis_prompt(company_name, ticker, current_date):
     base_prompt = f"""
 [角色設定]
 您是結合「華爾街機構操盤手」與「資深技術分析師」的 AI 投資顧問。
-您的分析核心邏輯嚴格遵循以下實戰理論：
-1. **道氏理論 (Dow Theory)**：以「高點更高、低點更高」確認多頭趨勢。
-2. **葛蘭碧八大法則 (Granville's Rules)**：判斷均線乖離與支撐壓力。
-3. **指標共振 (Confluence)**：**KD 與 MACD** 的雙重確認是進場關鍵。
-4. **酒田戰法 (Candlestick Patterns)**：識別關鍵變盤 K 線。
+您的分析核心邏輯嚴格遵循使用者指定的以下實戰理論：
+
+1. **道氏理論 (Dow Theory)**：以「高點更高、低點更高」確認主要趨勢方向。
+2. **KD+MACD 共振戰法**：這是使用者強調的高勝率策略，必須尋找 KD 黃金交叉且 MACD 柱狀體翻紅的訊號。
+3. **葛蘭碧八大法則 (Granville's Rules)**：利用均線 (MA) 的支撐與壓力來判斷買賣點。
+4. **日本酒田戰法 (Candlestick Patterns)**：精確識別 K 線反轉訊號。
+5. **產業生命週期**：針對科技/AI 股，判斷其處於「基礎建設」、「邊緣裝置」或「軟體應用」的哪一階段。
 
 [研究對象]
 公司：{company_name} ({ticker})
 基準日：{current_date}
 
-[分析任務]
-請根據台灣股市(TWSE/TPEx)最新數據，撰寫一份 Markdown 格式的深度戰略報告：
+[分析任務與章節要求]
+請根據台灣股市最新數據，撰寫一份 Markdown 格式的深度報告：
 
 ## 1. 執行摘要 (Executive Summary)
-一句話總結多空方向，並直接給出風險等級。
+一句話總結目前的技術面與基本面狀態，並直接點出風險等級。
 
 ## 2. 產業週期與基本面 (Industry & Fundamentals)
-* **產業階段**：該公司處於基礎建設期、應用爆發期還是成熟期？(參考 AI 產業週期)
-* **營收動能**：近 3 個月營收年增率 (YoY) 趨勢。
-* **估值位階**：目前 PE/PB 處於歷史高位還是低位？
+* **AI 產業階段判斷**：依據財經M平方的邏輯，該公司目前是處於第一階段(基礎建設/雲端)、第二階段(Edge AI/手機筆電) 還是第三階段(軟體/應用)？
+* **營收動能**：最近 3 個月營收年增率 (YoY) 趨勢。
+* **估值位階**：本益比 (PE) 與 股價淨值比 (PB) 的歷史區間位置。
 
 ## 3. 籌碼面詳解 (Chip Analysis)
-* **法人動向**：外資與投信近 5 日是連續買超、賣超還是調節？(注意投信作帳)。
-* **籌碼流向**：千張大戶持股比例變化 vs 散戶持股比例變化。
+* **法人動向**：外資與投信近 5 日是連續買超、賣超還是調節？
+* **大戶籌碼**：千張大戶持股比例是否增加？籌碼是否流向散戶？
 
-## 4. 技術面深度戰法 (Technical Deep Dive) - *核心重點*
-請依照以下邏輯進行嚴格檢視：
-* **趨勢定義 (道氏理論)**：目前結構是「多頭排列」(高過前高) 還是「空頭抵抗」？
+## 4. 技術面深度戰法 (Technical Deep Dive) - *重點精華*
+請嚴格依據以下邏輯進行分析：
+* **趨勢定義 (道氏理論)**：目前是「多頭排列」(高過前高、低不破低) 還是空頭？
 * **均線戰法 (葛蘭碧)**：
-    * 股價相對於 MA20/MA60 的位置。
-    * 是否出現「回測均線不破」的買點，或「乖離過大」的賣點？
-* **指標雙重確認 (KD + MACD 共振)**：
-    * **KD 指標**：是否位於低檔黃金交叉？
-    * **MACD 指標**：柱狀體 (Histogram) 是否翻紅或持續放大？
-    * *關鍵判斷*：是否出現「KD 金叉 且 MACD 翻紅」的共振訊號？(勝率最高)
-* **布林通道 (Bollinger Bands)**：股價是否沿著上軌攻擊(強勢)，或跌破下軌(超賣)？
-* **K線型態**：識別「吞噬」、「錘頭」、「晨星」或「墓碑」等反轉訊號。
+    * 股價是否回測均線(MA20/MA60)不破而上漲(買點)？
+    * 股價是否乖離過大應注意拉回(賣點)？
+* **指標雙重確認 (KD + MACD)**：
+    * **KD 指標**：是否出現黃金交叉？(K值由下往上突破D值)
+    * **MACD 指標**：柱狀體 (Histogram) 是否翻紅？
+    * *關鍵判斷*：是否出現「KD 金叉 且 MACD 柱狀體向上」的**強勢共振訊號**？
+* **K線型態 (酒田戰法)**：識別是否有「吞噬」、「錘頭」、「晨星」或「墓碑」等反轉型態。
 
 ## 5. 交易策略與風險 (Strategy & Risks)
-* **進場規劃**：基於技術支撐位 (Support) 的建議佈局價位。
-* **停損/停利**：基於壓力位 (Resistance) 的出場規劃。
-* **風險因子**：供應鏈、匯率或地緣政治風險。
+* **進場規劃**：基於技術支撐位 (Support)，建議的佈局區間。
+* **停損/停利**：基於壓力位 (Resistance) 或關鍵均線跌破的出場點。
+* **風險因子**：供應鏈斷鏈、匯率波動或地緣政治風險。
 
 ## 6. 綜合評級 (Final Verdict)
 給出明確的投資建議 (Buy/Hold/Sell) 與信念分數。
@@ -79,10 +80,11 @@ def get_stock_analysis_prompt(company_name, ticker, current_date):
     return base_prompt
 
 # ==========================================
-# 主程式邏輯
+# 主程式邏輯 (Gemini API)
 # ==========================================
 
-# 從 Streamlit Secrets 讀取 Key (安全做法)
+# 從 Streamlit Secrets 讀取 Key (最安全的做法)
+# 如果您在本地測試，可以暫時改為 api_key = "您的新Key"
 api_key = st.secrets.get("GOOGLE_API_KEY")
 
 if api_key:
@@ -105,7 +107,7 @@ def analyze_stock(company, ticker):
     prompt = get_stock_analysis_prompt(company, ticker, current_date)
     
     try:
-        # 使用 Gemini 1.5 Flash (快速且免費額度高)
+        # 使用 Gemini 1.5 Flash (速度快且免費額度高)
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         return response.text
@@ -118,7 +120,7 @@ def analyze_stock(company, ticker):
 # ==========================================
 st.set_page_config(page_title="台股 AI 操盤手 (專業版)", layout="wide")
 
-st.title("📈 台股 AI 深度投資分析 (整合 KD+MACD 與葛蘭碧戰法)")
+st.title("📈 台股 AI 深度投資分析 (KD+MACD 戰法)")
 st.markdown("---")
 
 # 側邊欄
@@ -130,14 +132,14 @@ with st.sidebar:
     analyze_btn = st.button("🚀 啟動 AI 戰略分析")
     
     if not api_key:
-        st.error("⚠️ 未偵測到 API Key！")
-        st.markdown("請到 Streamlit Community Cloud 的 **App Settings > Secrets** 設定：")
-        st.code('GOOGLE_API_KEY = "您的_新_KEY_貼在這裡"', language="toml")
+        st.warning("⚠️ 未偵測到 API Key")
+        st.info("請到 Streamlit Secrets 設定 GOOGLE_API_KEY")
 
 # 主要邏輯
 if analyze_btn:
     if not api_key:
-        st.stop() # 停止執行
+        st.error("請先設定 API Key 才能開始分析！")
+        st.stop()
         
     with st.spinner(f"正在運用道氏理論與 KD+MACD 模型分析 {company_input} ({ticker_input})..."):
         report_text = analyze_stock(company_input, ticker_input)
