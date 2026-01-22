@@ -100,4 +100,193 @@ def analyze_logic(df):
         reasons.append("✅ **[道氏理論]**：多頭排列！股價站穩季線(生命線)之上，趨勢向上。")
     elif curr['Close'] < curr['MA60'] and curr['MA20'] < curr['MA60']:
         score -= 20
-        reasons.append("❌ **[道氏理論]**：空頭
+        reasons.append("❌ **[道氏理論]**：空頭排列！股價跌破季線，趨勢向下。")
+
+    # 2. KD + MACD 共振 (您的核心策略)
+    # 判斷 KD 金叉
+    kd_gold = (curr['K'] > curr['D']) and (prev['K'] <= prev['D'])
+    kd_dead = (curr['K'] < curr['D']) and (prev['K'] >= prev['D'])
+    
+    # 判斷 MACD 紅柱
+    macd_red = curr['MACD_Hist'] > 0
+    macd_green = curr['MACD_Hist'] < 0
+    
+    if kd_gold and macd_red:
+        score += 25
+        reasons.append("🔥 **[最強組合]**：偵測到「KD金叉」且「MACD紅柱」共振！勝率提高 80% 的強勢買訊。")
+    elif kd_gold:
+        score += 10
+        reasons.append("📈 **[KD指標]**：低檔黃金交叉，短線轉強。")
+    elif kd_dead:
+        score -= 10
+        reasons.append("📉 **[KD指標]**：高檔死亡交叉，短線轉弱。")
+        
+    # 3. 葛蘭碧八大法則 (乖離率)
+    # 乖離率 = (股價 - 季線) / 季線
+    bias = (curr['Close'] - curr['MA60']) / curr['MA60']
+    
+    if bias > 0.2: # 正乖離 20%
+        score -= 15
+        reasons.append("⚠️ **[葛蘭碧法則]**：正乖離過大 (>20%)，股價衝太快，小心拉回修正。")
+    elif bias < -0.2: # 負乖離 20%
+        score += 10
+        reasons.append("✨ **[葛蘭碧法則]**：負乖離過大 (<-20%)，股價超跌，有機會反彈。")
+        
+    # 4. 酒田戰法 (K線型態 - 簡化版)
+    # 陽包陰 (吞噬)：今天紅K，且實體包覆昨天的黑K
+    is_engulfing = (curr['Close'] > curr['Open']) and \
+                   (prev['Close'] < prev['Open']) and \
+                   (curr['Close'] > prev['Open']) and \
+                   (curr['Open'] < prev['Close'])
+                   
+    if is_engulfing:
+        score += 15
+        reasons.append("✨ **[酒田戰法]**：出現「陽包陰 (吞噬)」型態，主力強勢表態！")
+        
+    # 5. 布林通道
+    if curr['Close'] > curr['BB_Up']:
+        reasons.append("🌊 **[布林通道]**：觸及上軌，短線過熱。")
+    elif curr['Close'] < curr['BB_Low']:
+        reasons.append("🌊 **[布林通道]**：觸及下軌，進入超賣區。")
+
+    # 限制分數
+    score = max(0, min(100, score))
+    
+    # 產出結論
+    if score >= 75:
+        signal = "積極買進 (Strong Buy)"
+        color = "red" # 台股紅漲
+        advice = "各項指標共振向上，適合積極佈局。"
+    elif score >= 60:
+        signal = "偏多操作 (Buy)"
+        color = "red"
+        advice = "趨勢偏多，可尋找拉回買點。"
+    elif score <= 25:
+        signal = "快逃 / 做空 (Strong Sell)"
+        color = "green" # 台股綠跌
+        advice = "空頭趨勢成形，建議減碼或離場。"
+    elif score <= 40:
+        signal = "保守觀望 (Hold/Sell)"
+        color = "green"
+        advice = "趨勢轉弱，多看少做。"
+    else:
+        signal = "區間盤整 (Neutral)"
+        color = "gray"
+        advice = "方向不明，建議觀望。"
+        
+    return df, score, signal, color, reasons, advice
+
+# ==========================================
+# 3. UI 介面設計
+# ==========================================
+# 標題
+st.title("📈 台股 AI 戰略分析 (小白友善版)")
+st.markdown("輸入代號，AI 自動運用 **道氏理論 + KD/MACD 共振 + 葛蘭碧法則** 幫您檢查。")
+
+# 搜尋區 (簡單化)
+c1, c2 = st.columns([3, 1])
+with c1:
+    ticker_input = st.text_input("輸入股票代號", value="2330", placeholder="例如: 2330, 2603")
+with c2:
+    st.write("")
+    st.write("")
+    run_btn = st.button("🔍 立即分析", type="primary")
+
+if run_btn:
+    ticker = format_ticker(ticker_input)
+    
+    with st.spinner(f"正在計算 {ticker} 的 KD、MACD 與籌碼數據..."):
+        try:
+            # A. 抓取數據
+            df = yf.download(ticker, period="1y")
+            fundamentals = get_fundamentals(ticker)
+            
+            if df.empty:
+                st.error("❌ 找不到資料，請確認代號正確。")
+                st.stop()
+                
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # B. 執行分析邏輯
+            df, score, signal, color, reasons, advice = analyze_logic(df)
+            
+            # C. 取得最新價格
+            last_price = df.iloc[-1]['Close']
+            change = last_price - df.iloc[-2]['Close']
+            pct = (change / df.iloc[-2]['Close']) * 100
+            
+            # ================= 顯示結果 =================
+            st.markdown("---")
+            
+            # 1. 核心結論區 (最顯眼)
+            col_res1, col_res2 = st.columns([1, 2])
+            
+            with col_res1:
+                st.metric("目前股價", f"{last_price:.2f}", f"{change:.2f} ({pct:.2f}%)")
+                st.caption(f"代號: {ticker}")
+                
+            with col_res2:
+                # 紅綠燈效果
+                if color == "red":
+                    st.success(f"### 🎯 結論：{signal}")
+                elif color == "green":
+                    st.error(f"### 🎯 結論：{signal}")
+                else:
+                    st.warning(f"### 🎯 結論：{signal}")
+                
+                st.progress(score)
+                st.markdown(f"**AI 建議：** {advice}")
+
+            # 2. 基本面 (小白愛看的)
+            st.subheader("📊 公司體質 (基本面)")
+            if fundamentals:
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("EPS (每股盈餘)", fundamentals['eps'])
+                f2.metric("本益比 (PE)", fundamentals['pe_ratio'])
+                f3.metric("殖利率 (Yield)", fundamentals['yield'])
+                f4.metric("ROE (股東權益)", fundamentals['roe'])
+            else:
+                st.info("暫無基本面資料 (可能是ETF)")
+
+            # 3. 詳細理由 (這裡放入您指定的分析方法)
+            st.markdown("---")
+            st.subheader("💡 為什麼 AI 建議買進/賣出？")
+            
+            # 直接列出重點，不用點開折疊，讓小白直接看
+            if len(reasons) > 0:
+                for r in reasons:
+                    st.write(r)
+            else:
+                st.write("目前技術面平穩，無特殊訊號。")
+
+            # 4. 圖表區 (視覺化)
+            st.markdown("---")
+            st.subheader("📈 技術走勢圖")
+            
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.1, row_heights=[0.7, 0.3],
+                                subplot_titles=("股價 & 均線 & 布林通道", "MACD 指標"))
+
+            # K線
+            fig.add_trace(go.Candlestick(x=df.index,
+                            open=df['Open'], high=df['High'],
+                            low=df['Low'], close=df['Close'],
+                            name='K線'), row=1, col=1)
+            
+            # 均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線(20MA)'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='季線(60MA)'), row=1, col=1)
+            
+            # MACD
+            colors = ['red' if v >= 0 else 'green' for v in df['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name='MACD柱狀'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DIF'], line=dict(color='orange', width=1), name='DIF'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DEA'], line=dict(color='blue', width=1), name='DEA'), row=2, col=1)
+
+            fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"分析發生錯誤：{str(e)}")
+            st.write("請稍後再試，或檢查股票代號是否正確。")
