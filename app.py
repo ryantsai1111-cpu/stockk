@@ -1,206 +1,254 @@
 import streamlit as st
-import json
-import re
-import os
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
-import google.generativeai as genai
 
 # ==========================================
-# 核心大腦：融合您提供的所有技術分析文件
+# 1. 核心運算引擎 (把技術分析邏輯寫死在程式裡)
 # ==========================================
-def get_stock_analysis_prompt(company_name, ticker, current_date):
-    next_year_date = (datetime.strptime(current_date, "%Y-%m-%d") + timedelta(days=365)).strftime("%Y-%m-%d")
-
-    base_prompt = f"""
-[角色設定]
-您是結合「華爾街機構操盤手」與「技術分析大師」的 AI 投資顧問。
-您的分析必須嚴格遵守以下使用者指定的實戰理論，這不是普通建議，而是戰略部署：
-
-1. **道氏理論 (Dow Theory)**：
-   - 趨勢確認：必須檢查是否符合「高點更高 (Higher Highs)、低點更高 (Higher Lows)」的多頭定義。
-   - 若高點不再創新高且跌破前低，必須標示為空頭反轉訊號。
-
-2. **最強指標共振 (KD + MACD)**：
-   - **核心買點**：尋找 KD 指標(9,3,3)黃金交叉，**同時** MACD 柱狀體 (Histogram) 翻紅或向上擴大的時刻。
-   - **核心賣點**：KD 死亡交叉且 MACD 綠柱擴大。
-   - 請特別標註是否出現「共振 (Resonance)」現象，這能大幅提高勝率。
-
-3. **葛蘭碧八大法則 (Granville's Rules)**：
-   - 利用 MA20 (月線) 與 MA60 (季線) 判斷：
-     - 買點：均線翻揚且股價回測不破。
-     - 賣點：均線下彎且股價反彈不過。
-
-4. **K線與型態學 (酒田戰法)**：
-   - 識別關鍵變盤訊號：如「吞噬 (Engulfing)」、「錘頭 (Hammer)」、「晨星/暮星」。
-
-5. **AI 產業生命週期 (AI Outlook)**：
-   - 針對科技股，判斷目前處於：
-     - 第一階段：基礎建設 (Cloud/Server/ASIC)
-     - 第二階段：邊緣裝置 (Edge AI/PC/Phone) - *目前的資金輪動焦點*
-     - 第三階段：軟體應用 (App/Services)
-
-[研究對象]
-公司：{company_name} ({ticker})
-基準日：{current_date}
-
-[輸出報告格式]
-請撰寫一份 Markdown 專業報告，包含：
-
-## 1. 操盤手快訊 (Executive Summary)
-- 目前的多空判斷 (Bullish/Bearish/Neutral)。
-- 最強烈的技術訊號是什麼？(例如：KD+MACD 共振金叉)
-
-## 2. 產業地位與週期 (Based on AI 2025 Outlook)
-- 該公司位於 AI 發展的哪一個階段？
-- 營收動能 YoY 的解讀。
-
-## 3. 籌碼博弈 (Chip Analysis)
-- **法人動向**：外資與投信近期的連續買賣超行為 (投信作帳/外資提款)。
-- **大戶 vs 散戶**：籌碼是集中還是發散？
-
-## 4. 技術面深度戰略 (Technical Strategy) - *最重要章節*
-*請依照道氏理論與葛蘭碧法則進行多維度掃描：*
-- **趨勢結構**：多頭排列 / 空頭排列 / 盤整。
-- **指標共振檢查**：
-   - KD 狀態：(數值/交叉方向)
-   - MACD 狀態：(柱狀體顏色/DIF與DEA位置)
-   - **結論**：是否出現「KD+MACD」共振買點？
-- **均線與乖離**：目前股價相對於 MA20/MA60 的位置。
-
-## 5. 交易計畫 (Trading Plan)
-- **進場區間**：建議的買入價格帶 (基於支撐位)。
-- **停損設定**：跌破哪個關鍵價位 (如 MA60) 必須離場？
-- **目標價位**：短期與長期目標 ({current_date} ~ {next_year_date})。
-
-[結構化訊號 - JSON]
-**系統強制要求：** 請在報告的**最後一段**，單獨輸出以下 JSON 格式資料 (供程式讀取儀表板使用，不要包含 ```json 標籤)：
-{{
-  "ticker": "{ticker}",
-  "recommendation": "Buy/Hold/Sell",
-  "conviction_score": 85,
-  "trend_status": "Up/Down/Sideways",
-  "chip_signal": "Bullish/Neutral/Bearish",
-  "tech_signal": "Bullish/Neutral/Bearish",
-  "key_catalyst": "簡短描述(如:KD+MACD共振)",
-  "target_price_short_term": 0.0
-}}
+def calculate_indicators(df):
     """
-    return base_prompt
-
-# ==========================================
-# 主程式邏輯 (Gemini API)
-# ==========================================
-
-# 讀取 API Key (優先從 Secrets 讀取)
-api_key = st.secrets.get("GOOGLE_API_KEY")
-
-# 設定 Google Gemini
-if api_key:
-    genai.configure(api_key=api_key)
-
-def extract_json_from_text(text):
-    """從回應中提取 JSON 數據，增加容錯率"""
-    try:
-        # 嘗試抓取 { ... } 之間的內容
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            json_str = match.group(0)
-            return json.loads(json_str)
-    except Exception:
-        return None
-    return None
-
-def analyze_stock(company, ticker):
-    """呼叫 AI 進行分析"""
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    prompt = get_stock_analysis_prompt(company, ticker, current_date)
+    計算所有技術指標：MA, KD, MACD, Bollinger Bands
+    """
+    # 1. 移動平均線 (葛蘭碧法則用)
+    df['MA5'] = df['Close'].rolling(window=5).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
+    df['MA60'] = df['Close'].rolling(window=60).mean() # 季線
     
-    try:
-        # 使用 Gemini 1.5 Flash 模型 (快速且免費額度高)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error: {str(e)}"
+    # 2. KD 指標 (9,3,3)
+    # RSV = (今日收盤 - 最近9天最低) / (最近9天最高 - 最近9天最低) * 100
+    df['9_High'] = df['High'].rolling(9).max()
+    df['9_Low'] = df['Low'].rolling(9).min()
+    df['RSV'] = 100 * (df['Close'] - df['9_Low']) / (df['9_High'] - df['9_Low'])
+    df = df.dropna()
+    
+    # 遞迴計算 K 與 D
+    k_list = []
+    d_list = []
+    k = 50 # 初始值
+    d = 50
+    for rsv in df['RSV']:
+        k = (2/3) * k + (1/3) * rsv
+        d = (2/3) * d + (1/3) * k
+        k_list.append(k)
+        d_list.append(d)
+    
+    df['K'] = k_list
+    df['D'] = d_list
+    
+    # 3. MACD 指標 (12, 26, 9)
+    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['DIF'] = exp12 - exp26
+    df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = 2 * (df['DIF'] - df['DEA'])
+    
+    # 4. 布林通道
+    df['BB_Mid'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
+    df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
+    
+    return df
+
+def generate_signal_report(df, ticker, name):
+    """
+    根據計算結果，生成類似 AI 的分析文字
+    """
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    report = []
+    score = 50 # 初始分數
+    
+    # --- 1. 道氏理論與趨勢 ---
+    trend = "盤整"
+    if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']:
+        trend = "多頭排列 (Bullish)"
+        score += 20
+        trend_msg = "✅ **道氏理論**：股價位於月線與季線之上，且均線發散向上，符合多頭特徵。"
+    elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']:
+        trend = "空頭排列 (Bearish)"
+        score -= 20
+        trend_msg = "❌ **道氏理論**：股價跌破月線與季線，均線下彎，空頭趨勢明顯。"
+    else:
+        trend_msg = "⚠️ **道氏理論**：股價在均線附近震盪，趨勢不明顯。"
+
+    report.append(trend_msg)
+    
+    # --- 2. KD + MACD 共振 (您的核心策略) ---
+    kd_signal = "中性"
+    macd_signal = "中性"
+    resonance = False
+    
+    # KD 判斷
+    if last['K'] > last['D'] and prev['K'] <= prev['D']:
+        kd_signal = "黃金交叉"
+        kd_msg = "📈 **KD指標**：出現黃金交叉 (K值向上突破D值)，短線轉強。"
+        score += 10
+    elif last['K'] < last['D'] and prev['K'] >= prev['D']:
+        kd_signal = "死亡交叉"
+        kd_msg = "📉 **KD指標**：出現死亡交叉 (K值向下跌破D值)，短線轉弱。"
+        score -= 10
+    else:
+        kd_msg = f"🔸 **KD指標**：K值({last['K']:.1f}) 與 D值({last['D']:.1f}) 無明顯交叉。"
+
+    # MACD 判斷
+    if last['MACD_Hist'] > 0 and prev['MACD_Hist'] <= 0:
+        macd_signal = "翻紅 (買訊)"
+        macd_msg = "🚀 **MACD指標**：柱狀體由綠翻紅，多頭動能轉強。"
+        score += 10
+    elif last['MACD_Hist'] > 0 and last['MACD_Hist'] > prev['MACD_Hist']:
+        macd_msg = "💪 **MACD指標**：紅柱持續放大，多頭動能延續。"
+        score += 5
+    elif last['MACD_Hist'] < 0:
+        macd_msg = "🐻 **MACD指標**：柱狀體為綠色，空方控盤。"
+        score -= 5
+    else:
+        macd_msg = "🔸 **MACD指標**：震盪整理中。"
+        
+    # 共振判斷
+    if (last['K'] > last['D']) and (last['MACD_Hist'] > 0):
+        resonance = True
+        score += 20
+        res_msg = "🔥 **【關鍵訊號】KD+MACD 共振**：偵測到「KD金叉」且「MACD紅柱」，這是高勝率的強勢買訊！"
+    else:
+        res_msg = "💤 **共振狀態**：未出現 KD+MACD 雙重共振訊號。"
+        
+    report.append(kd_msg)
+    report.append(macd_msg)
+    report.append(res_msg)
+
+    # --- 3. 葛蘭碧法則 (均線) ---
+    bias = ((last['Close'] - last['MA60']) / last['MA60']) * 100
+    ma_msg = f"📏 **葛蘭碧法則**：目前股價與季線乖離率為 {bias:.2f}%。"
+    if bias > 20:
+        ma_msg += " (乖離過大，留意拉回風險)"
+        score -= 5
+    elif bias < -20:
+        ma_msg += " (負乖離過大，有機會反彈)"
+        score += 5
+    report.append(ma_msg)
+
+    # --- 4. 布林通道 ---
+    if last['Close'] >= last['BB_Up']:
+        bb_msg = "⚡ **布林通道**：股價觸及上軌，強勢但也需注意超買。"
+    elif last['Close'] <= last['BB_Low']:
+        bb_msg = "💧 **布林通道**：股價觸及下軌，處於超賣區。"
+    else:
+        bb_msg = "🌊 **布林通道**：股價在通道內正常波動。"
+    report.append(bb_msg)
+
+    # 限制分數範圍
+    score = max(0, min(100, score))
+    
+    return {
+        "text_report": report,
+        "score": score,
+        "trend": trend,
+        "resonance": resonance,
+        "price": last['Close'],
+        "change": last['Close'] - prev['Close'],
+        "pct_change": (last['Close'] - prev['Close']) / prev['Close'] * 100
+    }
 
 # ==========================================
-# UI 介面設計
+# UI 介面
 # ==========================================
-st.set_page_config(page_title="專業操盤手 AI", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股程式化操盤手 (免Key版)", layout="wide", page_icon="📈")
 
-st.title("📈 專業操盤手 AI (道氏+葛蘭碧+指標共振版)")
+st.title("📈 台股程式化操盤手 (純運算・免API Key)")
+st.caption("使用 Python 直接計算：KD + MACD + 葛蘭碧法則 + 布林通道")
 st.markdown("---")
 
-# 側邊欄：設定與狀態檢查
+# 側邊欄
 with st.sidebar:
-    st.header("1. 系統狀態")
-    if api_key:
-        if api_key.startswith("AIza"):
-            st.success("✅ API Key 格式正確 (Google)")
-        elif api_key.startswith("sk-"):
-            st.error("❌ 偵測到 OpenAI Key，請更換為 Google Gemini Key")
-        else:
-            st.warning("⚠️ API Key 格式可能不正確")
-    else:
-        st.error("❌ 未偵測到 API Key")
-        st.info("請至 Secrets 設定 `GOOGLE_API_KEY`")
+    st.header("股票設定")
+    ticker_input = st.text_input("股票代號 (台股請加 .TW)", value="2330.TW")
+    st.caption("例如：2330.TW (台積電), 2603.TW (長榮), 0050.TW")
+    run_btn = st.button("🚀 開始計算分析", type="primary")
 
-    st.header("2. 股票設定")
-    ticker_input = st.text_input("股票代號", value="2330")
-    company_input = st.text_input("公司名稱", value="台積電")
-    
-    run_btn = st.button("🚀 執行戰略分析", type="primary")
-    st.markdown("---")
-    st.caption("策略核心：\n1. 道氏理論趨勢\n2. KD+MACD 共振\n3. AI 產業週期")
-
-# 主要執行邏輯
 if run_btn:
-    if not api_key:
-        st.error("⛔ 無法執行：請先設定 API Key。")
-        st.stop()
-        
-    if not api_key.startswith("AIza"):
-        st.error("⛔ 無法執行：Key 格式錯誤，這不是 Gemini 的 Key。")
-        st.stop()
-
-    with st.spinner(f"正在運用 KD+MACD 與道氏理論掃描 {company_input} ({ticker_input})..."):
-        report = analyze_stock(company_input, ticker_input)
-        
-        # 錯誤處理
-        if report and report.startswith("Error:"):
-            st.error(f"連線失敗：{report}")
-            st.write("建議：請檢查 Key 是否已被刪除，或嘗試 Reboot App。")
-        elif report:
-            st.session_state['report'] = report
-            st.session_state['data'] = extract_json_from_text(report)
-            st.balloons()
-
-# 報告顯示區域
-if 'report' in st.session_state:
-    data = st.session_state.get('data')
-    
-    # 1. 戰情儀表板
-    if data:
-        st.subheader("📊 戰略訊號儀表板")
-        c1, c2, c3, c4 = st.columns(4)
-        
-        # 投資建議顏色
-        rec = data.get('recommendation', 'Hold')
-        rec_color = "green" if rec == "Buy" else "red" if rec == "Sell" else "orange"
-        
-        with c1:
-            st.markdown(f"**投資建議**")
-            st.markdown(f"### :{rec_color}[{rec}]")
-        with c2:
-            st.metric("趨勢狀態", data.get('trend_status', 'N/A'))
-        with c3:
-            st.metric("籌碼/技術", f"{data.get('chip_signal')} / {data.get('tech_signal')}")
-        with c4:
-            st.metric("目標價", data.get('target_price_short_term', 0))
+    with st.spinner(f"正在從 Yahoo Finance 下載 {ticker_input} 資料並運算中..."):
+        try:
+            # 1. 下載資料 (抓一年份)
+            df = yf.download(ticker_input, period="1y")
             
-        st.info(f"🔑 **關鍵催化劑**：{data.get('key_catalyst', '分析中...')}")
-        st.markdown("---")
-    
-    # 2. 完整文字報告
-    st.subheader("📝 深度分析報告")
-    st.markdown(st.session_state['report'])
+            if df.empty:
+                st.error("❌ 找不到資料，請確認股票代號是否正確 (例如台積電是 2330.TW)")
+                st.stop()
+            
+            # 處理 MultiIndex (新版 yfinance 可能會有)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # 2. 執行運算
+            df = calculate_indicators(df)
+            result = generate_signal_report(df, ticker_input, ticker_input)
+            
+            # 3. 顯示儀表板
+            st.subheader("📊 訊號儀表板")
+            c1, c2, c3, c4 = st.columns(4)
+            
+            # 決定顏色
+            color = "normal"
+            if result['score'] >= 70: color = "normal" # Streamlit metric 自動綠色? 不，要手動
+            
+            c1.metric("目前股價", f"{result['price']:.2f}", f"{result['change']:.2f} ({result['pct_change']:.2f}%)")
+            c2.metric("多空分數", f"{result['score']} / 100", delta_color="normal")
+            c3.metric("主要趨勢", result['trend'])
+            c4.metric("關鍵共振", "YES 🔥" if result['resonance'] else "NO")
+            
+            st.markdown("---")
+
+            # 4. 顯示自動生成的分析報告
+            st.subheader("📝 程式運算分析報告")
+            
+            # 組合報告文字
+            for line in result['text_report']:
+                st.markdown(f"- {line}")
+
+            # 5. 繪製互動式圖表 (K線 + MA + KD/MACD)
+            st.markdown("---")
+            st.subheader("📈 技術分析圖表")
+            
+            # 建立子圖 (上圖 K線, 下圖 MACD)
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.05, row_heights=[0.7, 0.3],
+                                subplot_titles=('K線與均線 (MA20/60)', 'MACD 指標'))
+
+            # K線圖
+            fig.add_trace(go.Candlestick(x=df.index,
+                            open=df['Open'], high=df['High'],
+                            low=df['Low'], close=df['Close'],
+                            name='K線'), row=1, col=1)
+            
+            # 均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線 (MA20)'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='季線 (MA60)'), row=1, col=1)
+            
+            # 布林通道
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', width=1, dash='dot'), name='布林上軌'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=1, dash='dot'), name='布林下軌'), row=1, col=1)
+
+            # MACD
+            # 顏色設定：紅柱代表多，綠柱代表空
+            colors = ['red' if v >= 0 else 'green' for v in df['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name='MACD柱狀體'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DIF'], line=dict(color='orange', width=1), name='DIF'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DEA'], line=dict(color='blue', width=1), name='DEA'), row=2, col=1)
+
+            # 設定版面
+            fig.update_layout(height=800, xaxis_rangeslider_visible=False, title_text=f"{ticker_input} 技術分析圖")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # 顯示原始數據表格 (除錯用)
+            with st.expander("查看詳細數據表格"):
+                st.dataframe(df.tail(10))
+
+        except Exception as e:
+            st.error(f"發生錯誤：{e}")
+            st.write("建議檢查股票代號是否正確 (台股代號後方需加上 .TW)")
