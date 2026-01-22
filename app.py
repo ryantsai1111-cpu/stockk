@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 # ==========================================
 # 1. 基礎設定與輔助函數
 # ==========================================
-st.set_page_config(page_title="台股AI操盤手 (小白友善版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股分析助手", layout="wide", page_icon="📈")
 
 def format_ticker(user_input):
     """自動加上 .TW，讓使用者只要輸入 2330"""
@@ -180,8 +180,8 @@ def analyze_logic(df):
 # 3. UI 介面設計
 # ==========================================
 # 標題
-st.title("📈 台股 AI 戰略分析 (小白友善版)")
-st.markdown("輸入代號，AI 自動運用 **道氏理論 + KD/MACD 共振 + 葛蘭碧法則** 幫您檢查。")
+st.title("📈 台股戰略分析")
+st.markdown("輸入代號，自動運用 **道氏理論 + KD/MACD 共振 + 葛蘭碧法則** 幫您檢查。")
 
 # 搜尋區 (簡單化)
 c1, c2 = st.columns([3, 1])
@@ -290,3 +290,4 @@ if run_btn:
         except Exception as e:
             st.error(f"分析發生錯誤：{str(e)}")
             st.write("請稍後再試，或檢查股票代號是否正確。")
+
