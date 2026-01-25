@@ -1,12 +1,6 @@
 streamlit
 yfinance
 pandas
-requests
-beautifulsoup4
-lxml
-html5lib
-deep-translator
-google-generativeai
-numpy
 plotly
 ta
+google-generativeai
