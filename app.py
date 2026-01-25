@@ -1,127 +1,120 @@
 import streamlit as st
-import time
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ==========================================
-# 0. 啟動檢查 (最優先執行)
+# 1. 基礎設定與輔助函數
 # ==========================================
-st.set_page_config(page_title="專業台股 AI 操盤室", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股分析助手", layout="wide", page_icon="📈")
 
-# 如果畫面能顯示這行，代表 Streamlit 活著
-# st.toast("系統正在啟動...", icon="🚀") 
+def format_ticker(user_input):
+    """自動加上 .TW，讓使用者只要輸入 2330"""
+    user_input = user_input.upper().strip()
+    # 移除常見的錯誤符號
+    user_input = user_input.replace("台積電", "2330").replace("長榮", "2603")
+    
+    if user_input.isdigit():
+        return f"{user_input}.TW"
+    return user_input
 
-# ==========================================
-# 1. 安全引入套件 (防止白畫面)
-# ==========================================
-try:
-    import yfinance as yf
-    import pandas as pd
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    import google.generativeai as genai
-    from ta.trend import MACD, SMAIndicator
-    from ta.momentum import RSIIndicator, StochasticOscillator
-    from ta.volatility import BollingerBands
-except ImportError as e:
-    st.error(f"⚠️ 環境設置錯誤：{e}")
-    st.warning("請確認 requirements.txt 包含: streamlit, yfinance, pandas, plotly, ta, google-generativeai")
-    st.stop()
-
-# ==========================================
-# 2. 核心邏輯
-# ==========================================
-
-@st.cache_data(ttl=3600)
-def get_stock_data(ticker):
-    """抓取數據並計算指標"""
+def get_fundamentals(ticker):
+    """抓取基本面：EPS, PE, 殖利率"""
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period="1y")
-        
-        if df.empty:
-            return None, None
-            
         info = stock.info
+        data = {
+            "name": info.get('longName', ticker),
+            "pe_ratio": info.get('trailingPE', 'N/A'),
+            "yield": info.get('dividendYield', 0),
+            "roe": info.get('returnOnEquity', 0),
+            "eps": info.get('trailingEps', 'N/A')
+        }
+        # 格式化殖利率
+        if data['yield'] and isinstance(data['yield'], (int, float)):
+             data['yield'] = f"{data['yield']*100:.2f}%"
         
-        # 使用 ta 套件計算
-        df['MA20'] = SMAIndicator(df['Close'], window=20).sma_indicator()
-        df['MA60'] = SMAIndicator(df['Close'], window=60).sma_indicator()
-        
-        bb = BollingerBands(df['Close'], window=20, window_dev=2)
-        df['BB_H'] = bb.bollinger_hband()
-        df['BB_L'] = bb.bollinger_lband()
-        
-        df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
-        
-        macd = MACD(df['Close'])
-        df['MACD_Bar'] = macd.macd_diff()
-        
-        kd = StochasticOscillator(df['High'], df['Low'], df['Close'])
-        df['K'] = kd.stoch()
-        
-        return df, info
+        return data, stock
     except Exception as e:
-        st.error(f"數據讀取失敗: {e}")
         return None, None
 
-def get_ai_analysis(api_key, ticker, df):
-    if not api_key:
-        return "⚠️ 請輸入 API Key 以解鎖 AI 分析"
-    
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        latest = df.iloc[-1]
-        prompt = f"""
-        分析股票 {ticker}:
-        現價: {latest['Close']:.2f}, RSI: {latest['RSI']:.2f}, MACD柱狀: {latest['MACD_Bar']:.2f}
-        請給出：1.趨勢判斷 2.關鍵價位 3.操作建議 (條列式, 繁體中文)
-        """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"AI 錯誤: {e}"
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    """手動計算 MACD (不依賴 ta 套件)"""
+    exp1 = df['Close'].ewm(span=fast, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    histogram = macd - signal_line
+    return macd, signal_line, histogram
 
 # ==========================================
-# 3. 介面顯示
+# 2. 前端介面
 # ==========================================
-st.title("🚀 專業台股 AI 操盤室")
+st.title("📈 台股個股分析儀表板")
 
 with st.sidebar:
-    st.header("⚙️ 設定")
-    ticker_input = st.text_input("股票代號", "2330").upper()
-    ticker = f"{ticker_input}.TW" if ticker_input.isdigit() else ticker_input
-    
-    api_key = st.text_input("Gemini API Key", type="password")
-    st.caption("無 Key 僅顯示圖表")
+    st.header("設定")
+    ticker_input = st.text_input("輸入股票代號", "2330")
+    ticker = format_ticker(ticker_input)
+    st.info(f"正在查詢: {ticker}")
 
 if ticker:
-    with st.spinner("正在連線交易所..."):
-        df, info = get_stock_data(ticker)
-
-    if df is not None:
-        # 顯示數據
-        last = df.iloc[-1]
-        chg = last['Close'] - df.iloc[-2]['Close']
+    fund_data, stock = get_fundamentals(ticker)
+    
+    if fund_data:
+        # 顯示基本面數據
+        st.subheader(f"{fund_data['name']} ({ticker})")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("本益比 (PE)", fund_data['pe_ratio'])
+        col2.metric("EPS", fund_data['eps'])
+        col3.metric("殖利率", fund_data['yield'])
+        col4.metric("ROE", fund_data['roe'])
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("收盤價", f"{last['Close']:.2f}", f"{chg:.2f}")
-        c2.metric("成交量", f"{int(last['Volume']/1000)} 張")
-        c3.metric("RSI", f"{last['RSI']:.2f}")
-        c4.metric("MACD", f"{last['MACD_Bar']:.2f}")
+        # 抓取 K 線資料
+        df = stock.history(period="1y")
+        
+        if not df.empty:
+            # 計算指標
+            df['MA20'] = df['Close'].rolling(window=20).mean()
+            df['MA60'] = df['Close'].rolling(window=60).mean()
+            
+            # 手算布林通道
+            std = df['Close'].rolling(window=20).std()
+            df['BB_Upper'] = df['MA20'] + (std * 2)
+            df['BB_Lower'] = df['MA20'] - (std * 2)
+            
+            # 手算 MACD
+            df['DIF'], df['DEM'], df['MACD_Hist'] = calculate_macd(df)
 
-        # 繪圖
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='MA20'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue'), name='MA60'), row=1, col=1)
-        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Bar'], name='MACD'), row=2, col=1)
-        fig.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(l=10,r=10,t=30,b=10))
-        st.plotly_chart(fig, use_container_width=True)
+            # 繪圖
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.1, row_heights=[0.7, 0.3],
+                                subplot_titles=("股價 & 均線 & 布林通道", "MACD 指標"))
 
-        # AI 按鈕
-        if st.button("🤖 生成 AI 報告"):
-            st.write(get_ai_analysis(api_key, ticker, df))
+            # K線
+            fig.add_trace(go.Candlestick(x=df.index,
+                            open=df['Open'], high=df['High'],
+                            low=df['Low'], close=df['Close'],
+                            name='K線'), row=1, col=1)
+            
+            # 均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線(20MA)'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='季線(60MA)'), row=1, col=1)
+            
+            # 布林通道
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='gray', width=0.5, dash='dot'), name='布林上緣'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='gray', width=0.5, dash='dot'), name='布林下緣'), row=1, col=1)
+
+            # MACD
+            colors = ['red' if v >= 0 else 'green' for v in df['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name='MACD柱狀'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DIF'], line=dict(color='orange', width=1), name='DIF (快)'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['DEM'], line=dict(color='blue', width=1), name='DEM (慢)'), row=2, col=1)
+
+            fig.update_layout(xaxis_rangeslider_visible=False, height=600)
+            st.plotly_chart(fig, use_container_width=True)
             
     else:
-        st.error("查無資料，請檢查代號")
+        st.error("找不到該股票資訊，請確認代號。")
