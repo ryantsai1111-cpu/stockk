@@ -9,234 +9,250 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
 # ==========================================
-# 1. 頁面配置
+# 1. 頁面配置與樣式
 # ==========================================
-st.set_page_config(page_title="台股專家決策系統", layout="wide", page_icon="📊")
+st.set_page_config(page_title="台股全方位決策系統", layout="wide", page_icon="📈")
 
-# CSS 優化視覺
 st.markdown("""
 <style>
-    .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4b4b;}
-    .signal-box {padding: 15px; border-radius: 5px; margin-bottom: 10px;}
-    .buy-signal {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
-    .sell-signal {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
-    .neutral-signal {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
+    .big-font {font-size:20px !important; font-weight: bold;}
+    .reason-box {
+        padding: 15px; 
+        border-radius: 8px; 
+        margin-bottom: 10px; 
+        border-left: 5px solid #ccc;
+        background-color: #f8f9fa;
+    }
+    .bullish {border-left-color: #28a745; background-color: #d4edda; color: #155724;}
+    .bearish {border-left-color: #dc3545; background-color: #f8d7da; color: #721c24;}
+    .neutral {border-left-color: #ffc107; background-color: #fff3cd; color: #856404;}
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心邏輯：專家規則引擎
+# 2. 數據抓取與指標計算
 # ==========================================
-
 @st.cache_data(ttl=3600)
-def get_data_and_analyze(ticker):
+def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
+        # 抓取 1 年數據
         df = stock.history(period="1y")
         
-        if df.empty: return None, None
+        if df.empty: return None, None, None
 
-        # --- 技術指標計算 (基於上傳的技術分析文件) ---
-        # 1. 趨勢指標 (葛蘭碧 / 道氏理論)
+        # --- 技術指標計算 ---
+        # 1. 均線 (趨勢)
+        df['MA5'] = SMAIndicator(df['Close'], window=5).sma_indicator()
         df['MA20'] = SMAIndicator(df['Close'], window=20).sma_indicator() # 月線
-        df['MA60'] = SMAIndicator(df['Close'], window=60).sma_indicator() # 季線 (生命線)
+        df['MA60'] = SMAIndicator(df['Close'], window=60).sma_indicator() # 季線
         
-        # 2. 動能指標 (WinSmart KD+MACD)
-        macd = MACD(df['Close'])
-        df['DIF'] = macd.macd()
-        df['DEM'] = macd.macd_signal()
-        df['OSC'] = macd.macd_diff() # 柱狀圖
-        
+        # 2. KD 指標 (WinSmart 策略核心)
         kd = StochasticOscillator(df['High'], df['Low'], df['Close'])
         df['K'] = kd.stoch()
         df['D'] = kd.stoch_signal()
         
-        # 3. 相對強弱 (RSI)
+        # 3. MACD (動能)
+        macd = MACD(df['Close'])
+        df['DIF'] = macd.macd()
+        df['DEM'] = macd.macd_signal()
+        df['OSC'] = macd.macd_diff()
+        
+        # 4. RSI (情緒)
         df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
         
-        # 4. 布林通道 (波動率)
+        # 5. 布林通道 (波動)
         bb = BollingerBands(df['Close'], window=20, window_dev=2)
-        df['BB_High'] = bb.bollinger_hband()
-        df['BB_Low'] = bb.bollinger_lband()
+        df['BB_H'] = bb.bollinger_hband()
+        df['BB_L'] = bb.bollinger_lband()
         
-        return df, stock.info
+        # --- 基本面資訊 (嘗試抓取) ---
+        info = stock.info
+        fundamentals = {
+            "PE": info.get('trailingPE', 'N/A'),
+            "EPS": info.get('trailingEps', 'N/A'),
+            "PB": info.get('priceToBook', 'N/A'),
+            "MarketCap": info.get('marketCap', 0),
+            "Sector": info.get('sector', '未知產業')
+        }
+        
+        return df, info, fundamentals
     except Exception as e:
-        st.error(f"數據抓取錯誤: {e}")
-        return None, None
+        st.error(f"數據抓取失敗: {e}")
+        return None, None, None
 
-def expert_diagnosis(df):
-    """
-    根據使用者上傳的各種技術分析文件，編寫的「寫死」邏輯。
-    """
+# ==========================================
+# 3. 核心邏輯：決策解釋引擎
+# ==========================================
+def analyze_logic(df, fundamentals):
     latest = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
     
-    signals = {
-        "technical": [], # 技術面
-        "chips": [],     # 籌碼面
-        "news_impact": [], # 消息面(反應在價格上)
-        "score": 0       # 綜合評分 (-5 ~ +5)
+    reasons = {
+        "bullish": [], # 看多理由
+        "bearish": [], # 看空理由
+        "neutral": []  # 中性/警示
     }
     
-    # --- 1. 技術面判定 (參考 WinSmart KD+MACD 文件) ---
-    # 黃金交叉共振
+    # -----------------------------------
+    # A. 技術面分析 (WinSmart + 葛蘭碧)
+    # -----------------------------------
+    
+    # 1. KD + MACD 共振策略
     kd_gold = latest['K'] > latest['D'] and prev['K'] < prev['D']
     macd_gold = latest['OSC'] > 0 and prev['OSC'] < 0
     
-    if latest['K'] > latest['D'] and latest['OSC'] > 0:
-        signals['technical'].append("✅ [WinSmart策略] KD 與 MACD 呈現雙多頭排列，勝率較高。")
-        signals['score'] += 2
+    if kd_gold and latest['OSC'] > 0:
+        reasons['bullish'].append("🎯 **WinSmart 策略**：KD 黃金交叉且 MACD 柱狀體翻紅，技術面出現強烈買進共振訊號。")
+    elif latest['K'] > latest['D'] and latest['OSC'] > 0:
+        reasons['bullish'].append("📈 **趨勢續強**：KD 與 MACD 維持雙多頭排列，股價動能強勁。")
     elif latest['K'] < latest['D'] and latest['OSC'] < 0:
-        signals['technical'].append("❌ [WinSmart策略] KD 與 MACD 呈現雙空頭排列，建議觀望。")
-        signals['score'] -= 2
+        reasons['bearish'].append("📉 **空方控盤**：KD 與 MACD 呈現雙空頭排列，建議避開。")
         
-    if kd_gold:
-        signals['technical'].append("🚀 [短線訊號] KD 低檔黃金交叉，短線反彈契機。")
-        signals['score'] += 1
-        
-    # 葛蘭碧法則 (季線生命線)
+    # 2. 葛蘭碧八大法則 (均線)
     if latest['Close'] > latest['MA60']:
-        if latest['MA60'] > df.iloc[-5]['MA60']:
-            signals['technical'].append("✅ [葛蘭碧法則] 股價站上上揚的季線，長線趨勢偏多。")
-            signals['score'] += 1
+        reasons['bullish'].append("✅ **長線保護短線**：股價位於季線 (60MA) 之上，長期趨勢偏多。")
     else:
-        signals['technical'].append("⚠️ [葛蘭碧法則] 股價位於季線之下，長線趨勢偏空。")
-        signals['score'] -= 1
+        reasons['bearish'].append("⚠️ **趨勢偏空**：股價位於季線 (60MA) 之下，上方壓力沉重。")
+        
+    if latest['Close'] > latest['MA20'] and prev['Close'] < prev['MA20']:
+        reasons['bullish'].append("🚀 **突破月線**：股價剛站上月線，短期轉強訊號。")
 
-    # --- 2. 籌碼面判定 (量能分析) ---
+    # -----------------------------------
+    # B. 籌碼面分析 (量價關係)
+    # -----------------------------------
     avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
-    if latest['Volume'] > avg_vol * 1.5 and latest['Close'] > latest['Open']:
-        signals['chips'].append("🔥 [主力動向] 爆量長紅！成交量大於月均量 1.5 倍，主力明顯進駐。")
-        signals['score'] += 1
-    elif latest['Volume'] > avg_vol * 1.5 and latest['Close'] < latest['Open']:
-        signals['chips'].append("💀 [主力動向] 爆量長黑！高檔出貨跡象，需特別小心。")
-        signals['score'] -= 2
-    else:
-        signals['chips'].append("⚖️ [量能] 成交量溫和，無特殊主力動作。")
-
-    # --- 3. 消息/情緒面判定 (RSI & 乖離) ---
-    # 利用價格波動來反推消息面衝擊
-    if latest['RSI'] > 75:
-        signals['news_impact'].append("🔥 [過熱警訊] RSI > 75，市場情緒過度樂觀，隨時可能因利多出盡回檔。")
-        signals['score'] -= 1
-    elif latest['RSI'] < 25:
-        signals['news_impact'].append("💧 [超賣訊號] RSI < 25，市場恐慌過度，可能出現乖離過大的反彈。")
-        signals['score'] += 1
+    vol_ratio = latest['Volume'] / avg_vol if avg_vol > 0 else 0
     
-    # 布林通道擠壓 (變盤前兆)
-    bw = (latest['BB_High'] - latest['BB_Low']) / latest['MA20']
-    if bw < 0.10: # 頻寬小於 10%
-        signals['news_impact'].append("⚡ [變盤預告] 布林通道極度收縮，重大消息即將引發大行情。")
+    if vol_ratio > 1.5 and latest['Close'] > latest['Open']:
+        reasons['bullish'].append(f"🔥 **主力進駐**：今日成交量為月均量的 {vol_ratio:.1f} 倍且收紅，顯示有大資金進場點火。")
+    elif vol_ratio > 1.5 and latest['Close'] < latest['Open']:
+        reasons['bearish'].append(f"💀 **高檔出貨**：爆量長黑 (量增 {vol_ratio:.1f} 倍)，主力可能正在倒貨，需嚴防回檔。")
+    elif vol_ratio < 0.6:
+        reasons['neutral'].append("💤 **人氣退潮**：成交量萎縮，市場觀望氣氛濃厚。")
 
-    return signals
+    # -----------------------------------
+    # C. 基本面與評價 (價值投資)
+    # -----------------------------------
+    pe = fundamentals['PE']
+    if pe != 'N/A':
+        if pe < 15:
+            reasons['bullish'].append(f"💎 **價值低估**：本益比 ({pe:.1f}) 低於 15 倍，具備長線投資價值。")
+        elif pe > 40:
+            reasons['neutral'].append(f"⚠️ **估值過高**：本益比 ({pe:.1f}) 偏高，股價可能已反應未來利多，追高風險大。")
+    
+    # -----------------------------------
+    # D. 消息/情緒面 (由波動率推算)
+    # -----------------------------------
+    if latest['RSI'] > 80:
+        reasons['bearish'].append("🔥 **情緒過熱**：RSI 指標 > 80，市場貪婪程度極高，隨時可能獲利回吐。")
+    elif latest['RSI'] < 20:
+        reasons['bullish'].append("💧 **恐慌超賣**：RSI 指標 < 20，市場過度恐慌，醞釀跌深反彈契機。")
+
+    # 寬度擠壓 (Bollinger Band Squeeze)
+    bandwidth = (latest['BB_H'] - latest['BB_L']) / latest['MA20']
+    if bandwidth < 0.10:
+        reasons['neutral'].append("⚡ **變盤前兆**：布林通道極度壓縮，重大消息即將引發大行情 (注意突破方向)。")
+
+    return reasons
 
 # ==========================================
-# 3. 前端介面
+# 4. 前端介面
 # ==========================================
-st.title("📈 台股個股決策戰情室 (No-AI版)")
+st.title("🛡️ 專業級台股決策戰情室")
 
 with st.sidebar:
     st.header("🔍 股票搜尋")
-    ticker_input = st.text_input("請輸入代號 (如 2330)", "2330")
-    # 自動補全 .TW
+    ticker_input = st.text_input("輸入代號 (如 2330)", "2330")
     ticker = ticker_input.upper().strip()
     if ticker.isdigit(): ticker += ".TW"
     
     st.markdown("---")
-    st.info("💡 本系統採用「葛蘭碧八大法則」與「WinSmart KD+MACD」策略邏輯進行自動運算，不依賴外部 AI。")
+    st.info("本系統整合 WinSmart 技術策略、葛蘭碧法則與籌碼分析，自動生成買賣理由。")
 
 if ticker:
-    with st.spinner(f"正在分析 {ticker} 的主力籌碼與技術型態..."):
-        df, info = get_data_and_analyze(ticker)
+    with st.spinner(f"正在深入分析 {ticker} 的各項數據..."):
+        df, info, funds = get_stock_data(ticker)
     
     if df is not None:
-        # --- A. 股票基本資訊卡 ---
-        st.subheader(f"{info.get('longName', ticker)} ({ticker.replace('.TW', '')})")
-        
+        # --- 1. 頂部資訊卡 ---
+        st.subheader(f"{info.get('longName', ticker)}")
         last = df.iloc[-1]
         chg = last['Close'] - df.iloc[-2]['Close']
         pct = (chg / df.iloc[-2]['Close']) * 100
-        color = "red" if chg > 0 else "green" # 台股紅漲綠跌
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("收盤價", f"{last['Close']:.1f}", f"{chg:.1f} ({pct:.1f}%)")
-        col2.metric("成交量", f"{int(last['Volume']/1000)} 張")
-        col3.metric("RSI (14)", f"{last['RSI']:.1f}")
-        col4.metric("K值 (9)", f"{last['K']:.1f}")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("收盤價", f"{last['Close']:.2f}", f"{chg:.2f} ({pct:.2f}%)")
+        c2.metric("成交量", f"{int(last['Volume']/1000)} 張")
+        c3.metric("RSI 強弱", f"{last['RSI']:.1f}")
+        c4.metric("本益比 (PE)", f"{funds['PE']}")
+        c5.metric("EPS (TTM)", f"{funds['EPS']}")
 
-        # --- B. 專家診斷結果 (核心優化部分) ---
-        diagnosis = expert_diagnosis(df)
+        # --- 2. 決策理由詳解 (重點功能) ---
+        analysis = analyze_logic(df, funds)
         
-        st.markdown("### 🧭 投資決策儀表板")
+        st.markdown("### 🧭 投資決策分析報告")
         
-        # 顯示綜合建議
-        final_score = diagnosis['score']
-        if final_score >= 2:
-            st.success(f"🚀 **強力買進訊號 (得分 {final_score})**：多項指標共振，趨勢向上。")
-        elif final_score <= -2:
-            st.error(f"🛑 **賣出/避險訊號 (得分 {final_score})**：空頭排列或過熱，建議減碼。")
-        else:
-            st.warning(f"⚖️ **區間盤整/觀望 (得分 {final_score})**：多空力道拉鋸。")
+        # 顯示看多理由
+        if analysis['bullish']:
+            st.markdown("#### ✅ 買進訊號 / 正面因素")
+            for reason in analysis['bullish']:
+                st.markdown(f"<div class='reason-box bullish'>{reason}</div>", unsafe_allow_html=True)
+        
+        # 顯示看空理由
+        if analysis['bearish']:
+            st.markdown("#### 🛑 賣出訊號 / 風險警示")
+            for reason in analysis['bearish']:
+                st.markdown(f"<div class='reason-box bearish'>{reason}</div>", unsafe_allow_html=True)
+                
+        # 顯示中性觀察
+        if analysis['neutral']:
+            st.markdown("#### ⚖️ 中性觀察 / 潛在變數")
+            for reason in analysis['neutral']:
+                st.markdown(f"<div class='reason-box neutral'>{reason}</div>", unsafe_allow_html=True)
 
-        # 使用 Tabs 分類顯示三大面向
-        tab1, tab2, tab3 = st.tabs(["📊 技術面分析", "💰 籌碼面分析", "📰 消息與情緒"])
+        if not analysis['bullish'] and not analysis['bearish']:
+            st.info("目前盤勢膠著，多空訊號不明顯，建議觀望。")
+
+        # --- 3. 視覺化圖表 ---
+        st.markdown("---")
+        st.markdown("### 📊 技術面與籌碼面圖表")
+        
+        tab1, tab2 = st.tabs(["K線與均線策略", "MACD與動能"])
         
         with tab1:
-            st.markdown("**依據 WinSmart 與 葛蘭碧法則分析：**")
-            for msg in diagnosis['technical']:
-                if "✅" in msg or "🚀" in msg:
-                    st.markdown(f"<div class='signal-box buy-signal'>{msg}</div>", unsafe_allow_html=True)
-                elif "❌" in msg or "⚠️" in msg:
-                    st.markdown(f"<div class='signal-box sell-signal'>{msg}</div>", unsafe_allow_html=True)
-                else:
-                    st.write(msg)
-            
-            # 繪製 K 線 + MA + 布林
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+            # K線
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='月線(20MA)'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue'), name='季線(60MA)'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['BB_High'], line=dict(color='gray', width=0.5, dash='dot'), name='布林上緣'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=0.5, dash='dot'), name='布林下緣'), row=1, col=1)
-            
-            # KD 指標
-            fig.add_trace(go.Scatter(x=df.index, y=df['K'], line=dict(color='purple'), name='K值'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['D'], line=dict(color='orange', dash='dot'), name='D值'), row=2, col=1)
-            
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-
-        with tab2:
-            st.markdown("**依據成交量與主力動向分析：**")
-            for msg in diagnosis['chips']:
-                st.write(msg)
-            
-            # 繪製量能與 MACD
-            fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.5, 0.5])
+            # 均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='月線'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue'), name='季線'), row=1, col=1)
+            # 布林
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_H'], line=dict(color='gray', width=0.5, dash='dot'), name='布林上緣'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_L'], line=dict(color='gray', width=0.5, dash='dot'), name='布林下緣'), row=1, col=1)
             # 成交量
             colors = ['red' if row['Open'] < row['Close'] else 'green' for i, row in df.iterrows()]
-            fig2.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='成交量'), row=1, col=1)
+            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='成交量'), row=2, col=1)
+            
+            fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with tab2:
+            fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.4, 0.3, 0.3])
+            # Price
+            fig2.add_trace(go.Scatter(x=df.index, y=df['Close'], name='收盤價'), row=1, col=1)
+            # KD
+            fig2.add_trace(go.Scatter(x=df.index, y=df['K'], name='K值', line=dict(color='purple')), row=2, col=1)
+            fig2.add_trace(go.Scatter(x=df.index, y=df['D'], name='D值', line=dict(color='orange', dash='dot')), row=2, col=1)
             # MACD
             colors_macd = ['red' if v > 0 else 'green' for v in df['OSC']]
-            fig2.add_trace(go.Bar(x=df.index, y=df['OSC'], marker_color=colors_macd, name='MACD柱狀'), row=2, col=1)
-            fig2.add_trace(go.Scatter(x=df.index, y=df['DIF'], line=dict(color='orange'), name='DIF'), row=2, col=1)
-            fig2.add_trace(go.Scatter(x=df.index, y=df['DEM'], line=dict(color='blue'), name='DEM'), row=2, col=1)
+            fig2.add_trace(go.Bar(x=df.index, y=df['OSC'], marker_color=colors_macd, name='MACD柱狀'), row=3, col=1)
+            fig2.add_trace(go.Scatter(x=df.index, y=df['DIF'], name='DIF'), row=3, col=1)
+            fig2.add_trace(go.Scatter(x=df.index, y=df['DEM'], name='DEM'), row=3, col=1)
             
-            fig2.update_layout(height=400, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+            fig2.update_layout(height=700, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig2, use_container_width=True)
 
-        with tab3:
-            st.markdown("**依據市場情緒與乖離率推算：**")
-            for msg in diagnosis['news_impact']:
-                 st.write(msg)
-            
-            st.markdown("---")
-            st.markdown("#### 📢 相關消息面標籤")
-            # 嘗試顯示產業類別作為基本面補充
-            st.info(f"所屬產業：{info.get('sector', '未知')} / {info.get('industry', '未知')}")
-            st.write(f"市值：{info.get('marketCap', 0)/100000000:.2f} 億")
-            st.write(f"本益比 (PE)：{info.get('trailingPE', 'N/A')}")
-            st.write("*註：由於未連接外部新聞 API，消息面分析基於價格波動與指標過熱程度進行反推。*")
-
     else:
-        st.error("找不到股票資料，請檢查代號是否正確。")
+        st.error("查無資料，請確認股票代號。")
