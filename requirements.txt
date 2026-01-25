@@ -1,6 +1,6 @@
 streamlit
-yfinance
+yfinance>=0.2.40
 pandas
+numpy<2.0.0
 plotly
 ta
-google-generativeai
