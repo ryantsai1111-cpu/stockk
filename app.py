@@ -74,7 +74,7 @@ def get_ai_analysis(api_key, ticker, df, info):
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash') # 使用較快且免費的模型
+        model = genai.GenerativeModel('gemini-pro') # 使用較快且免費的模型
         
         latest = df.iloc[-1]
         trend = "多頭排列" if latest['MA20'] > latest['MA60'] else "空頭/盤整"
@@ -192,3 +192,4 @@ if ticker:
             
     else:
         st.error("查無資料，請確認股票代號是否正確 (例如 2330)。")
+
