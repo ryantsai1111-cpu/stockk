@@ -7,75 +7,90 @@ from plotly.subplots import make_subplots
 from ta.trend import MACD, SMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
+import time
 
 # ==========================================
 # 1. 頁面配置
 # ==========================================
-st.set_page_config(page_title="台股專家決策系統 (驗證版)", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="台股即時戰情室", layout="wide", page_icon="⚡")
 
-# CSS 樣式：讓訊號卡片更清晰
+# CSS 樣式
 st.markdown("""
 <style>
-    .outlook-card {padding: 20px; border-radius: 12px; margin-bottom: 15px; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}
-    .short-term {background: linear-gradient(135deg, #FF512F 0%, #DD2476 100%);} /* 紅色系：短線 */
-    .long-term {background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);} /* 綠色系：長線 */
-    .signal-reason {background-color: rgba(255,255,255,0.15); padding: 8px; border-radius: 5px; margin-top: 5px; font-size: 14px;}
-    .big-score {font-size: 28px; font-weight: bold; border-bottom: 2px solid rgba(255,255,255,0.3); padding-bottom: 10px; margin-bottom: 10px;}
+    .outlook-card {padding: 15px; border-radius: 10px; margin-bottom: 10px; color: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1);}
+    .short-term {background: linear-gradient(135deg, #FF512F 0%, #DD2476 100%);}
+    .long-term {background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);}
+    .big-score {font-size: 24px; font-weight: bold; padding-bottom: 5px;}
+    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
+    .time-badge {background-color: #333; color: #eee; padding: 2px 8px; border-radius: 4px; font-size: 12px;}
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 數據核心 (參數嚴格對照文件)
+# 2. 數據核心 (支援多週期)
 # ==========================================
-@st.cache_data(ttl=3600)
-def get_stock_data(ticker):
+def get_stock_data(ticker, interval="1d"):
+    """
+    interval: '1d' (日K) 或 '60m' (60分K)
+    """
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period="2y") # 抓兩年以計算年線
+        
+        # 根據週期抓取不同長度的資料
+        if interval == "1d":
+            period = "2y" # 日線抓長一點算年線
+        else:
+            period = "1mo" # 60分K抓1個月就夠了 (Yahoo限制60m最多730天，但資料量太大會慢)
+            
+        df = stock.history(period=period, interval=interval)
         
         if df.empty: return None, None, None
 
-        # --- A. 均線系統 (葛蘭碧法則 / 道氏理論) ---
-        # 5日線 (短線攻擊)
+        # --- A. 均線系統 ---
+        # 針對不同週期，均線的意義會不同，但邏輯不變
         df['MA5'] = SMAIndicator(df['Close'], window=5).sma_indicator()
-        # 20日線 (月線/支撐)
         df['MA20'] = SMAIndicator(df['Close'], window=20).sma_indicator()
-        # 60日線 (季線/生命線 - 葛蘭碧核心)
         df['MA60'] = SMAIndicator(df['Close'], window=60).sma_indicator()
-        # 200日線 (年線/牛熊分界)
-        df['MA200'] = SMAIndicator(df['Close'], window=200).sma_indicator()
+        
+        # 只有日線才算年線 (200MA)，分時線算200根意義不大
+        if interval == "1d":
+            df['MA200'] = SMAIndicator(df['Close'], window=200).sma_indicator()
+        else:
+            df['MA200'] = np.nan # 分時線不顯示年線
 
-        # --- B. KD 指標 (WinSmart 策略) ---
-        # 修正：台股慣用參數為 (9, 3, 3)，非預設的 14
-        kd = StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], 
-                                  window=9, smooth_window=3)
+        # --- B. KD 指標 (台股參數 9,3,3) ---
+        kd = StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], window=9, smooth_window=3)
         df['K'] = kd.stoch()
         df['D'] = kd.stoch_signal()
 
-        # --- C. MACD 指標 (動能) ---
-        # 標準參數 (12, 26, 9)
+        # --- C. MACD 指標 (標準 12,26,9) ---
         macd = MACD(close=df['Close'], window_slow=26, window_fast=12, window_sign=9)
         df['DIF'] = macd.macd()
         df['DEM'] = macd.macd_signal()
-        df['OSC'] = macd.macd_diff() # 柱狀圖
+        df['OSC'] = macd.macd_diff()
 
-        # --- D. RSI 指標 (情緒) ---
-        # 參數 (14)
+        # --- D. RSI 指標 (14) ---
         df['RSI'] = RSIIndicator(close=df['Close'], window=14).rsi()
         
-        # --- E. 布林通道 (波動率) ---
+        # --- E. 布林通道 ---
         bb = BollingerBands(close=df['Close'], window=20, window_dev=2)
         df['BB_H'] = bb.bollinger_hband()
         df['BB_L'] = bb.bollinger_lband()
-        df['BB_W'] = (df['BB_H'] - df['BB_L']) / df['MA20'] # 通道寬度 (擠壓判斷)
 
-        # --- F. 基本面概況 ---
+        # --- F. 基本面 (只抓一次) ---
         info = stock.info
         fundamentals = {
-            "PE": info.get('trailingPE', None), # 本益比
-            "Dividend": info.get('dividendYield', None), # 殖利率
-            "PB": info.get('priceToBook', None), # 股價淨值比
+            "PE": info.get('trailingPE', None),
+            "Vol_Ratio": 0 # 預設
         }
+        
+        # 計算量能倍數 (今日預估量 / 20日均量)
+        # 注意：盤中成交量是累積的，所以早盤看量會不準，這是一個簡單估算
+        if len(df) > 20:
+            vol_ma = df['Volume'].rolling(20).mean().iloc[-1]
+            current_vol = df['Volume'].iloc[-1]
+            if vol_ma > 0:
+                fundamentals['Vol_Ratio'] = current_vol / vol_ma
 
         return df, info, fundamentals
     except Exception as e:
@@ -83,211 +98,168 @@ def get_stock_data(ticker):
         return None, None, None
 
 # ==========================================
-# 3. 專家邏輯引擎 (依據上傳文件編寫)
+# 3. 專家邏輯 (適應雙週期)
 # ==========================================
-def analyze_logic(df, funds):
+def analyze_logic(df, interval):
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # === 短線戰術分析 (Short-term Tactics) ===
-    # 依據：WinSmart KD+MACD, 量價關係
-    short_score = 0
-    short_reasons = []
+    score = 0
+    reasons = []
 
-    # 1. WinSmart 雙指標共振 (權重高)
-    # 邏輯：KD金叉 (K>D) 且 MACD 柱狀圖為正 (OSC>0)
+    # 1. KD + MACD 共振 (WinSmart)
     if latest['K'] > latest['D'] and latest['OSC'] > 0:
-        # 進階確認：是否剛轉強 (昨天K<D 或 昨天綠柱)
         if prev['K'] < prev['D'] or prev['OSC'] < 0:
-             short_score += 3
-             short_reasons.append("★ **WinSmart 起漲點**：KD 金叉且 MACD 翻紅，雙指標共振確認！")
+             score += 3
+             reasons.append("★ **起漲訊號**：KD金叉且MACD翻紅 (雙指標共振)。")
         else:
-             short_score += 1
-             short_reasons.append("📈 **多頭續攻**：KD 與 MACD 維持多頭排列，動能強勁。")
+             score += 1
+             reasons.append("📈 **趨勢續強**：KD與MACD維持多頭。")
     elif latest['K'] < latest['D'] and latest['OSC'] < 0:
-        short_score -= 3
-        short_reasons.append("📉 **雙指標死叉**：KD 與 MACD 同步向下，短線空方主導。")
+        score -= 3
+        reasons.append("📉 **空方共振**：KD死叉且MACD綠柱 (雙指標空頭)。")
 
-    # 2. 成交量異常 (籌碼面)
-    vol_ma = df['Volume'].rolling(20).mean().iloc[-1]
-    if latest['Volume'] > vol_ma * 1.5:
-        if latest['Close'] > latest['Open']:
-            short_score += 1
-            short_reasons.append("🔥 **爆量長紅**：成交量放大 1.5 倍，主力資金進駐。")
+    # 2. 均線邏輯 (依週期而定)
+    if interval == "1d":
+        # 日線看生命線 (60MA)
+        if latest['Close'] > latest['MA60']:
+            score += 1
+            reasons.append("🦁 **站上季線**：長線趨勢偏多。")
         else:
-            short_score -= 2
-            short_reasons.append("💀 **爆量收黑**：高檔爆大量收黑 K，疑似主力出貨。")
-
-    # 3. RSI 極端值 (乖離率概念)
-    if latest['RSI'] > 80:
-        short_score -= 1
-        short_reasons.append("⚠️ **過熱警訊**：RSI > 80，短線隨時可能回檔整理。")
-    elif latest['RSI'] < 20:
-        short_score += 2
-        short_reasons.append("💎 **超賣反彈**：RSI < 20，乖離過大，醞釀反彈契機。")
-
-    # === 長線戰略分析 (Long-term Strategy) ===
-    # 依據：葛蘭碧八大法則, 道氏理論, 基本面
-    long_score = 0
-    long_reasons = []
-
-    # 1. 葛蘭碧法則 (生命線 MA60)
-    if latest['Close'] > latest['MA60']:
-        if latest['MA60'] > df.iloc[-20]['MA60']: # 季線翻揚
-            long_score += 2
-            long_reasons.append("🦁 **葛蘭碧多頭**：股價站穩季線且季線翻揚向上，長多格局確立。")
-        else:
-            long_score += 1
-            long_reasons.append("✅ **站上季線**：股價位於生命線之上，中長線偏多。")
+            score -= 1
+            reasons.append("🐻 **跌破季線**：長線趨勢偏空。")
     else:
-        long_score -= 2
-        long_reasons.append("🐻 **葛蘭碧空頭**：股價跌破季線，長線趨勢偏弱。")
+        # 60分K看 20MA (相當於日線的 5日線左右概念)
+        if latest['Close'] > latest['MA20']:
+            score += 1
+            reasons.append("⚡ **短線強勢**：股價沿著 20MA (布林中軌) 上攻。")
+        else:
+            score -= 1
+            reasons.append("⚠️ **短線轉弱**：跌破 20MA 支撐。")
 
-    # 2. 道氏理論 (均線排列)
-    if latest['MA20'] > latest['MA60'] > latest['MA200']:
-        long_score += 2
-        long_reasons.append("🚀 **多頭排列**：月線 > 季線 > 年線，呈現最強勢的多頭型態。")
+    # 3. RSI 過熱
+    if latest['RSI'] > 80:
+        score -= 1
+        reasons.append("🔥 **RSI過熱**：隨時可能回檔。")
+    elif latest['RSI'] < 20:
+        score += 2
+        reasons.append("💎 **RSI超賣**：醞釀反彈。")
 
-    # 3. 價值投資 (本益比 PE)
-    if funds['PE']:
-        pe = funds['PE']
-        if pe < 15:
-            long_score += 1
-            long_reasons.append(f"💰 **價值低估**：本益比 {pe:.1f} 倍低於市場平均，具長線投資價值。")
-        elif pe > 45:
-            long_score -= 1
-            long_reasons.append(f"⚠️ **估值過高**：本益比 {pe:.1f} 倍偏高，長線獲利空間壓縮。")
-
-    return {
-        "short": {"score": short_score, "reasons": short_reasons},
-        "long": {"score": long_score, "reasons": long_reasons}
-    }
+    return score, reasons
 
 def get_status_text(score):
-    if score >= 3: return "🔥 強力買進 / 積極操作"
-    elif score >= 1: return "🔴 偏多看待 / 持股續抱"
-    elif score == 0: return "⚪ 區間震盪 / 觀望"
-    elif score >= -2: return "🟢 偏空看待 / 逢高減碼"
-    else: return "☠️ 強力賣出 / 避險空手"
+    if score >= 3: return "🔥 強力買進"
+    elif score >= 1: return "🔴 偏多操作"
+    elif score == 0: return "⚪ 觀望整理"
+    elif score >= -2: return "🟢 偏空看待"
+    else: return "☠️ 賣出/避險"
 
 # ==========================================
 # 4. 前端介面
 # ==========================================
-st.title("🛡️ 專業級台股決策系統 (指標驗證版)")
+st.title("⚡ 台股即時戰情室 (盤中實戰版)")
 
 with st.sidebar:
-    st.header("🔍 股票搜尋")
-    ticker_input = st.text_input("輸入代號 (如 2330)", "2330")
+    st.header("⚙️ 戰情設定")
+    ticker_input = st.text_input("股票代號", "2330")
     ticker = ticker_input.upper().strip()
     if ticker.isdigit(): ticker += ".TW"
     
     st.markdown("---")
-    st.info("""
-    **指標參數驗證說明：**
-    1. **KD 指標**：採用台股參數 (9, 3, 3)
-    2. **MACD**：標準參數 (12, 26, 9)
-    3. **策略來源**：WinSmart 雙指標共振、葛蘭碧八大法則
-    """)
+    st.markdown("### 🕒 分析週期")
+    # 這裡讓使用者切換模式
+    mode = st.radio("選擇模式", ["日 K 線 (收盤分析)", "60 分 K (盤中即時)"], index=0)
+    
+    interval = "1d" if "日" in mode else "60m"
+    
+    st.markdown("---")
+    # 這是關鍵：強制刷新按鈕
+    if st.button("🔄 立即刷新報價"):
+        st.cache_data.clear() # 清除快取
+        st.rerun() # 重新執行
 
 if ticker:
-    with st.spinner("正在進行多重指標交叉驗證..."):
-        df, info, funds = get_stock_data(ticker)
+    # 盤中模式不使用長時間快取，或根本不快取
+    if interval == "60m":
+        df, info, funds = get_stock_data(ticker, interval) # 不加 spinner 加快體感
+        st.caption(f"⚡ 目前模式：**盤中 60分K** (數據延遲約 15 分鐘)")
+    else:
+        with st.spinner("正在分析日線結構..."):
+            df, info, funds = get_stock_data(ticker, interval)
+            st.caption("📅 目前模式：**日 K 線** (適合波段分析)")
     
     if df is not None:
-        # 1. 頂部基本資料
+        # 1. 報價區
         st.subheader(f"{info.get('longName', ticker)} ({ticker.replace('.TW', '')})")
         last = df.iloc[-1]
-        chg = last['Close'] - df.iloc[-2]['Close']
-        pct = (chg / df.iloc[-2]['Close']) * 100
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("現價", f"{last['Close']:.2f}", f"{chg:.2f} ({pct:.2f}%)")
-        c2.metric("成交量", f"{int(last['Volume']/1000)} 張")
-        c3.metric("RSI (14)", f"{last['RSI']:.1f}")
-        c4.metric("本益比 (PE)", f"{funds['PE']}" if funds['PE'] else "N/A")
-
-        # 2. 邏輯分析結果
-        result = analyze_logic(df, funds)
-        
-        st.markdown("### 🧭 長短期決策分析報告")
-        col1, col2 = st.columns(2)
-        
-        # --- 短線區塊 ---
-        with col1:
-            s_score = result['short']['score']
-            st.markdown(f"""
-            <div class="outlook-card short-term">
-                <div>⚡ <b>短線戰術 (1-2週)</b></div>
-                <div class="big-score">{get_status_text(s_score)}</div>
-                <div>依據：WinSmart KD+MACD、乖離率</div>
-            </div>
-            """, unsafe_allow_html=True)
+        # 處理漲跌幅 (Yahoo盤中數據有時候會亂，需做防呆)
+        try:
+            prev_close = df.iloc[-2]['Close']
+            chg = last['Close'] - prev_close
+            pct = (chg / prev_close) * 100
+        except:
+            chg = 0
+            pct = 0
             
-            if result['short']['reasons']:
-                for r in result['short']['reasons']:
-                    st.markdown(f"<div class='signal-reason'>{r}</div>", unsafe_allow_html=True)
-            else:
-                st.info("目前短線無明確多空訊號 (盤整中)。")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("現價", f"{last['Close']:.2f}", f"{chg:.2f} ({pct:.2f}%)")
+        col2.metric("週期", f"{interval}", delta="更新中" if interval=='60m' else None, delta_color="off")
+        col3.metric("KD(K值)", f"{last['K']:.1f}")
+        col4.metric("MACD柱狀", f"{last['OSC']:.2f}")
 
-        # --- 長線區塊 ---
-        with col2:
-            l_score = result['long']['score']
-            st.markdown(f"""
-            <div class="outlook-card long-term">
-                <div>🌳 <b>長線戰略 (3-6月)</b></div>
-                <div class="big-score">{get_status_text(l_score)}</div>
-                <div>依據：葛蘭碧八大法則 (季線)、基本面</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            if result['long']['reasons']:
-                for r in result['long']['reasons']:
-                    st.markdown(f"<div class='signal-reason'>{r}</div>", unsafe_allow_html=True)
-            else:
-                st.info("目前長線趨勢不明朗。")
+        # 2. 邏輯分析
+        score, reasons = analyze_logic(df, interval)
+        
+        st.markdown("### 🧭 戰術分析報告")
+        # 根據分數變色
+        bg_class = "short-term" if score >= 0 else "long-term" # 借用之前的CSS類別，紅多綠空
+        if score < 0: bg_class = "long-term" # 綠色
+        
+        st.markdown(f"""
+        <div class="outlook-card {bg_class}">
+            <div>綜合評分：<span class="big-score">{score}</span></div>
+            <div class="big-score">{get_status_text(score)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if reasons:
+            for r in reasons:
+                st.info(r)
+        else:
+            st.warning("目前無明確技術訊號，建議觀望。")
 
-        # 3. 驗證圖表 (視覺化證明)
+        # 3. 圖表
         st.markdown("---")
-        st.markdown("### 📊 指標訊號驗證圖")
-        
-        tab1, tab2 = st.tabs(["⚡ WinSmart 策略圖 (KD+MACD)", "🦁 葛蘭碧趨勢圖 (均線)"])
+        tab1, tab2 = st.tabs(["📊 主圖 (K線+均線)", "📉 副圖 (KD+MACD)"])
         
         with tab1:
-            # 繪製 KD 與 MACD 
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                                row_heights=[0.5, 0.25, 0.25],
-                                subplot_titles=("股價", "KD 指標 (9,3,3)", "MACD (12,26,9)"))
+            fig = make_subplots(rows=1, cols=1)
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='20MA'))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='60MA'))
+            # 只有日線顯示年線
+            if interval == "1d":
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='purple', width=1), name='200MA'))
             
-            # K線
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'), row=1, col=1)
+            fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{ticker} - {interval} 走勢圖")
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with tab2:
+            fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25])
+            fig2.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'), row=1, col=1)
             
             # KD
-            fig.add_trace(go.Scatter(x=df.index, y=df['K'], line=dict(color='purple', width=1.5), name='K值'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['D'], line=dict(color='orange', width=1.5, dash='dot'), name='D值'), row=2, col=1)
-            # 畫出 80/20 警戒線
-            fig.add_hline(y=80, line_dash="dot", row=2, col=1, line_color="red", opacity=0.3)
-            fig.add_hline(y=20, line_dash="dot", row=2, col=1, line_color="green", opacity=0.3)
+            fig2.add_trace(go.Scatter(x=df.index, y=df['K'], line=dict(color='purple'), name='K'), row=2, col=1)
+            fig2.add_trace(go.Scatter(x=df.index, y=df['D'], line=dict(color='orange', dash='dot'), name='D'), row=2, col=1)
+            fig2.add_hline(y=80, line_dash="dot", row=2, col=1, line_color="red")
+            fig2.add_hline(y=20, line_dash="dot", row=2, col=1, line_color="green")
             
             # MACD
             colors = ['red' if v > 0 else 'green' for v in df['OSC']]
-            fig.add_trace(go.Bar(x=df.index, y=df['OSC'], marker_color=colors, name='MACD柱狀'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['DIF'], line=dict(color='#E377C2', width=1), name='DIF'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['DEM'], line=dict(color='#17BECF', width=1), name='DEM'), row=3, col=1)
+            fig2.add_trace(go.Bar(x=df.index, y=df['OSC'], marker_color=colors, name='MACD'), row=3, col=1)
             
-            fig.update_layout(height=800, xaxis_rangeslider_visible=False, showlegend=True)
-            st.plotly_chart(fig, use_container_width=True)
-
-        with tab2:
-            # 繪製葛蘭碧均線 
-            fig2 = make_subplots(rows=1, cols=1)
-            fig2.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-            
-            # 關鍵均線
-            fig2.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線 (短撐)'))
-            fig2.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=2), name='季線 (生命線)'))
-            fig2.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='purple', width=2), name='年線 (長趨勢)'))
-            
-            fig2.update_layout(height=600, xaxis_rangeslider_visible=False, title="葛蘭碧法則驗證：觀察股價是否站穩季線(藍線)")
+            fig2.update_layout(height=600, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig2, use_container_width=True)
 
     else:
