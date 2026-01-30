@@ -11,7 +11,7 @@ from ta.volatility import BollingerBands
 # ==========================================
 # 1. 頁面配置
 # ==========================================
-st.set_page_config(page_title="台股全方位戰情室", layout="wide", page_icon="🏯")
+st.set_page_config(page_title="台股全方位戰情室 (旗艦版)", layout="wide", page_icon="🏯")
 
 st.markdown("""
 <style>
@@ -185,7 +185,7 @@ def get_status_text(score):
 # ==========================================
 # 4. 前端介面
 # ==========================================
-st.title("🛡️ 台股全方位戰情室")
+st.title("🛡️ 台股全方位戰情室 (旗艦版)")
 
 with st.sidebar:
     st.header("⚙️ 模式設定")
