@@ -3,15 +3,29 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
 from plotly.subplots import make_subplots
 from ta.trend import MACD, SMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
 # ==========================================
+# 0. 瀏覽器偽裝設定 (突破 Yahoo 封鎖的關鍵)
+# ==========================================
+def get_session():
+    """創建一個偽裝成 Chrome 瀏覽器的連線工作階段"""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7'
+    })
+    return session
+
+# ==========================================
 # 1. 頁面配置
 # ==========================================
-st.set_page_config(page_title="台股全方位戰情室 (旗艦版)", layout="wide", page_icon="🏯")
+st.set_page_config(page_title="台股全方位戰情室 (防擋版)", layout="wide", page_icon="🛡️")
 
 st.markdown("""
 <style>
@@ -25,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 數據核心 (雙軌 + 深度基本面)
+# 2. 數據核心 (使用 Session 防擋)
 # ==========================================
 def calculate_indicators(df, is_daily=True):
     if df is None or df.empty: return None
@@ -55,40 +69,61 @@ def calculate_indicators(df, is_daily=True):
 
 def get_hybrid_data(ticker, use_realtime=False):
     try:
-        stock = yf.Ticker(ticker)
+        # 使用偽裝 Session 初始化 Ticker
+        session = get_session()
+        stock = yf.Ticker(ticker, session=session)
         
         # 1. 日線數據
         df_daily = stock.history(period="2y", interval="1d")
+        
+        # 二次檢查：如果抓回來是空的，可能是 IP 真的爛掉了
+        if df_daily.empty:
+            raise ValueError("Yahoo 回傳空資料 (IP 可能被封鎖或代號錯誤)")
+            
         df_daily = calculate_indicators(df_daily, is_daily=True)
         
         # 2. 短線數據
         if use_realtime:
             df_short = stock.history(period="1mo", interval="60m")
-            df_short = calculate_indicators(df_short, is_daily=False)
-            source_text = "盤中 60分K"
+            # 如果盤中資料抓不到，自動降級回日線，避免崩潰
+            if df_short.empty:
+                df_short = df_daily.copy()
+                source_text = "收盤 日K線 (盤中資料連線失敗)"
+            else:
+                df_short = calculate_indicators(df_short, is_daily=False)
+                source_text = "盤中 60分K"
         else:
             df_short = df_daily.copy()
             source_text = "收盤 日K線"
 
-        # 3. 深度基本面 (嘗試抓取更多欄位)
-        info = stock.info
+        # 3. 深度基本面
+        # 注意：info 有時候會被擋得比 history 還兇，這裡加一個 try-except 保護
+        try:
+            info = stock.info
+        except:
+            info = {} # 如果基本面抓不到，至少讓技術面能顯示
+            
         fundamentals = {
-            "PE": info.get('trailingPE', None),          # 本益比
-            "PB": info.get('priceToBook', None),         # 股價淨值比
-            "ROE": info.get('returnOnEquity', None),     # ROE
-            "Yield": info.get('dividendYield', None),    # 殖利率
-            "Margin": info.get('profitMargins', None),   # 淨利率
-            "RevenueGr": info.get('revenueGrowth', None) # 營收成長率
+            "PE": info.get('trailingPE', None),
+            "PB": info.get('priceToBook', None),
+            "ROE": info.get('returnOnEquity', None),
+            "Yield": info.get('dividendYield', None),
+            "Margin": info.get('profitMargins', None)
         }
         
+        # 補救措施：如果 info 抓不到名字，直接用 ticker 當名字
+        if 'longName' not in info:
+            info['longName'] = ticker
+
         return df_daily, df_short, info, fundamentals, source_text
 
     except Exception as e:
-        st.error(f"數據連線錯誤: {e}")
+        st.error(f"嚴重連線錯誤: {e}")
+        st.caption("建議：請過 5 分鐘後再試，或按左側「強制刷新」。若持續失敗，代表此雲端 IP 已被 Yahoo 暫時黑名單。")
         return None, None, None, None, None
 
 # ==========================================
-# 3. 邏輯分析 (含基本面健檢)
+# 3. 邏輯分析
 # ==========================================
 def analyze_structure(df_daily, df_short, funds):
     # --- A. 短線戰術 ---
@@ -117,12 +152,12 @@ def analyze_structure(df_daily, df_short, funds):
         s_score -= 1
         s_reasons.append("⚠️ **短線轉弱**：跌破 20MA。")
 
-    # --- B. 長線戰略 (基本面大幅增強) ---
+    # --- B. 長線戰略 ---
     latest_l = df_daily.iloc[-1]
     l_score = 0
     l_reasons = []
     
-    # 1. 趨勢面 (葛蘭碧)
+    # 1. 趨勢面
     if latest_l['Close'] > latest_l['MA60']:
         l_score += 2
         l_reasons.append("🦁 **技術長多**：股價站穩季線 (生命線)。")
@@ -130,43 +165,40 @@ def analyze_structure(df_daily, df_short, funds):
         l_score -= 2
         l_reasons.append("🐻 **技術長空**：股價落於季線之下。")
         
-    # 2. 基本面健檢 (Fundamental Health Check)
+    # 2. 基本面健檢
     f_score = 0
     f_msgs = []
     
-    # ROE (股東權益報酬率)
+    # ROE
     if funds['ROE']:
-        if funds['ROE'] > 0.15: # ROE > 15%
+        if funds['ROE'] > 0.15:
             f_score += 2
-            f_msgs.append(f"💎 **優質企業**：ROE 高達 {funds['ROE']*100:.1f}%，獲利效率極佳。")
+            f_msgs.append(f"💎 **優質企業**：ROE {funds['ROE']*100:.1f}%，獲利效率極佳。")
         elif funds['ROE'] > 0.10:
             f_score += 1
-            f_msgs.append(f"✅ **獲利穩健**：ROE {funds['ROE']*100:.1f}%，表現合格。")
+            f_msgs.append(f"✅ **獲利穩健**：ROE {funds['ROE']*100:.1f}%。")
             
-    # 殖利率 (Yield)
+    # 殖利率
     if funds['Yield']:
-        if funds['Yield'] > 0.04: # > 4%
+        if funds['Yield'] > 0.04:
             f_score += 1
-            f_msgs.append(f"💰 **高殖利率**：殖利率 {funds['Yield']*100:.1f}%，具備存股價值。")
+            f_msgs.append(f"💰 **高殖利率**：殖利率 {funds['Yield']*100:.1f}%。")
             
-    # 獲利能力 (Margin)
+    # 淨利率
     if funds['Margin']:
-        if funds['Margin'] > 0.20:
-            f_msgs.append(f"🔥 **高淨利**：淨利率 {funds['Margin']*100:.1f}%，產品具競爭力。")
-        elif funds['Margin'] < 0:
+        if funds['Margin'] < 0:
             f_score -= 2
-            f_msgs.append(f"⚠️ **公司虧損**：淨利率為負，留意營運風險。")
+            f_msgs.append(f"⚠️ **公司虧損**：淨利率為負，留意風險。")
             
-    # 評價面 (PE)
+    # PE
     if funds['PE']:
-        if funds['PE'] < 15 and f_score > 0: # 便宜且好公司
+        if funds['PE'] < 15 and f_score > 0:
             f_score += 1
-            f_msgs.append(f"🛒 **價格便宜**：本益比 {funds['PE']:.1f} 倍，物美價廉。")
+            f_msgs.append(f"🛒 **價格便宜**：本益比 {funds['PE']:.1f} 倍。")
         elif funds['PE'] > 40:
             f_score -= 1
-            f_msgs.append(f"⚠️ **價格昂貴**：本益比 {funds['PE']:.1f} 倍，追高風險大。")
+            f_msgs.append(f"⚠️ **價格昂貴**：本益比 {funds['PE']:.1f} 倍。")
 
-    # 將基本面分數加入長線總分
     l_score += f_score
     l_reasons.extend(f_msgs)
 
@@ -185,7 +217,7 @@ def get_status_text(score):
 # ==========================================
 # 4. 前端介面
 # ==========================================
-st.title("🛡️ 台股全方位戰情室 (旗艦版)")
+st.title("🛡️ 台股全方位戰情室 (防擋版)")
 
 with st.sidebar:
     st.header("⚙️ 模式設定")
@@ -198,13 +230,13 @@ with st.sidebar:
     use_realtime = True if "盤中" in mode_select else False
     
     st.markdown("---")
-    if st.button("🔄 強制刷新報價"):
+    if st.button("🔄 強制刷新 (解決連線錯誤)"):
         st.cache_data.clear()
         st.rerun()
 
 if ticker:
-    with st.spinner("正在進行技術與基本面深度運算..."):
-        df_daily, df_short, info, funds, source_text = get_hybrid_data(ticker, use_realtime)
+    # 這裡不使用 st.spinner，因為如果很快就失敗，spinner 會閃一下很奇怪
+    df_daily, df_short, info, funds, source_text = get_hybrid_data(ticker, use_realtime)
 
     if df_daily is not None:
         # 1. 報價資訊
@@ -236,7 +268,6 @@ if ticker:
             <div class="outlook-card short-term">
                 <div>⚡ <b>短線戰術 ({'60分K' if use_realtime else '日K'})</b></div>
                 <div class="big-score">{get_status_text(score)}</div>
-                <div>重點：技術指標、價量關係</div>
             </div>
             """, unsafe_allow_html=True)
             for r in analysis['short']['reasons']:
@@ -248,13 +279,10 @@ if ticker:
             <div class="outlook-card long-term">
                 <div>🌳 <b>長線戰略 (趨勢 + 基本面)</b></div>
                 <div class="big-score">{get_status_text(score)}</div>
-                <div>重點：季線趨勢、ROE、殖利率</div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # 將基本面理由特別標註
             for r in analysis['long']['reasons']:
-                if "ROE" in r or "殖利率" in r or "本益比" in r or "淨利" in r:
+                if "ROE" in r or "殖利率" in r or "本益比" in r:
                     st.markdown(f"<div class='fundamental-box'>{r}</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"<div class='signal-reason'>{r}</div>", unsafe_allow_html=True)
@@ -284,6 +312,3 @@ if ticker:
             fig2.add_trace(go.Scatter(x=df_daily.index, y=df_daily['MA200'], line=dict(color='purple', width=2), name='年線'), row=1, col=1)
             fig2.update_layout(height=500, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig2, use_container_width=True)
-
-    else:
-        st.error("查無資料，請確認股票代號。")
